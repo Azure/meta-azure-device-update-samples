@@ -2,29 +2,90 @@
 # This file contains shared settings used by adu-update-image-v1, v2, v3
 # Each versioned recipe includes this file and only needs to set:
 #   - IMAGE_LINK_NAME (e.g., "adu-update-image-v1")
-#   - ADU_SOFTWARE_VERSION (e.g., "1.0.0", "2.0.0", "3.0.0")
+#   - ADU_SOFTWARE_VERSION (e.g., "1.0.0.1", "1.0.0.2", "1.0.0.3")
 #
-# BOARD-AGNOSTIC: Uses virtual/adu-base-image provider pattern
-# Your BSP layer must provide: PROVIDES = "virtual/adu-base-image"
+# SIMPLIFIED APPROACH:
+# Instead of building separate rootfs for each version, we:
+# 1. Take adu-base-image.ext4.gz
+# 2. Unpack it
+# 3. Modify /etc/adu-version to target version
+# 4. Repack as adu-update-image-vX.ext4.gz
+# 5. Package into .swu
 
 DESCRIPTION ?= "ADU swupdate image"
 SECTION = ""
 LICENSE = "CLOSED"
 
-# Dependencies - use virtual provider for board independence
-DEPENDS += "virtual/adu-base-image swupdate"
+DEPENDS += "adu-base-image swupdate e2fsprogs-native"
+
+# Task to create versioned filesystem from adu-base-image
+# This unpacks adu-base-image.ext4.gz, modifies /etc/adu-version using debugfs, and repacks
+do_create_versioned_image() {
+    # Find the adu-base-image ext4.gz file
+    BASE_IMAGE=$(find ${DEPLOY_DIR_IMAGE} -name 'adu-base-image-*.ext4.gz' -type f | head -n1)
+    
+    if [ -z "$BASE_IMAGE" ]; then
+        bbfatal "Could not find adu-base-image-*.ext4.gz in ${DEPLOY_DIR_IMAGE}"
+    fi
+    
+    bbnote "Creating versioned image for ${PN}"
+    bbnote "  Base image: $BASE_IMAGE"
+    bbnote "  Target version: ${ADU_SOFTWARE_VERSION}"
+    
+    # Create working directory
+    WORK=${WORKDIR}/versioned-image
+    rm -rf $WORK
+    mkdir -p $WORK
+    
+    # Decompress the base image
+    bbnote "Decompressing base image..."
+    gunzip -c "$BASE_IMAGE" > $WORK/rootfs.ext4
+    
+    # Create new adu-version file
+    echo "${ADU_SOFTWARE_VERSION}" > $WORK/adu-version.new
+    
+    # Use debugfs to write the file into ext4 filesystem
+    # debugfs can modify ext4 filesystems without mounting
+    bbnote "Updating /etc/adu-version to ${ADU_SOFTWARE_VERSION} using debugfs..."
+    debugfs -w -R "rm /etc/adu-version" $WORK/rootfs.ext4 2>/dev/null || true
+    debugfs -w -R "write $WORK/adu-version.new /etc/adu-version" $WORK/rootfs.ext4 || bbfatal "Failed to write /etc/adu-version"
+    
+    # Verify the change
+    bbnote "Verifying /etc/adu-version content..."
+    debugfs -R "cat /etc/adu-version" $WORK/rootfs.ext4 | head -1 | grep -q "${ADU_SOFTWARE_VERSION}" || bbwarn "Version verification failed"
+    
+    # Compress to deploy directory with correct name
+    OUTPUT_FILE="${DEPLOY_DIR_IMAGE}/${PN}-${MACHINE}.ext4.gz"
+    bbnote "Compressing to $OUTPUT_FILE..."
+    gzip -c $WORK/rootfs.ext4 > $OUTPUT_FILE
+    
+    # Create symlink for swupdate class (IMAGE_LINK_NAME)
+    cd ${DEPLOY_DIR_IMAGE}
+    ln -sf $(basename $OUTPUT_FILE) ${IMAGE_LINK_NAME}.ext4.gz
+    
+    bbnote "Created versioned image: $OUTPUT_FILE"
+    bbnote "  Symlink: ${IMAGE_LINK_NAME}.ext4.gz"
+}
+
+addtask create_versioned_image after do_unpack before do_swuimage
+do_create_versioned_image[depends] += "adu-base-image:do_image_complete"
+do_create_versioned_image[vardeps] += "ADU_SOFTWARE_VERSION"
+
 
 # Source files - sw-description template
 SRC_URI = "file://sw-description"
 
-# Image dependencies - what needs to be built before this
-IMAGE_DEPENDS = "virtual/adu-base-image"
-
 # Images and files to include in the .swu package
-# NOTE: Uses the base image provided by virtual/adu-base-image
-# Default provider is "adu-base-image" (set via PREFERRED_PROVIDER in local.conf)
-SWUPDATE_IMAGES = "adu-base-image"
-SWUPDATE_IMAGES_FSTYPES[adu-base-image] = ".ext4.gz"
+# Each update image packages its own filesystem with correct version
+# This ensures each .swu contains the correct /etc/adu-version
+SWUPDATE_IMAGES = "${PN}"
+
+# Set filesystem type for this image
+# Cannot use ${PN} in key, so we use python to set it dynamically
+python __anonymous() {
+    pn = d.getVar('PN')
+    d.setVarFlag('SWUPDATE_IMAGES_FSTYPES', pn, '.ext4.gz')
+}
 
 # RSA signing configuration
 # ADUC_PRIVATE_KEY - private key (.pem) file
@@ -72,8 +133,10 @@ addtask clean_old_deploys before do_deploy after do_swuimage
 # Inherit timestamp validation to ensure this image is rebuilt when base image changes
 inherit adu-timestamp-check
 
-# Add dependency on adu-base-image completion
-do_swuimage[depends] += "adu-base-image:do_image_complete"
+# Force rebuild when ADU_SOFTWARE_VERSION changes
+# This ensures each update image has the correct version in /etc/adu-version
+do_swuimage[vardeps] += "ADU_SOFTWARE_VERSION"
+do_image_complete[vardeps] += "ADU_SOFTWARE_VERSION"
 
 # Python task to log version being built with comprehensive tracing
 python do_set_version() {

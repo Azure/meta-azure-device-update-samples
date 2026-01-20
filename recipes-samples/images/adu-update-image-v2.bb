@@ -7,34 +7,10 @@ require adu-update-image-common.inc
 
 DESCRIPTION = "ADU swupdate image v2 (target for delta)"
 
-# Auto-increment build version from BASE_ADU_SOFTWARE_VERSION
-# If v1 is 1.0.0.1, v2 becomes 1.0.0.2
-# If v1 is 2.3.4.5, v2 becomes 2.3.4.6
-BASE_ADU_SOFTWARE_VERSION ??= "1.0.0.1"
-
-python () {
-    base_version = d.getVar('BASE_ADU_SOFTWARE_VERSION')
-    try:
-        parts = base_version.split('.')
-        if len(parts) == 4:
-            major, minor, patch, build = parts
-            new_build = str(int(build) + 1)
-            v2_version = f"{major}.{minor}.{patch}.{new_build}"
-        elif len(parts) == 3:
-            # Fallback for 3-part versions (legacy)
-            major, minor, patch = parts
-            new_patch = str(int(patch) + 1)
-            v2_version = f"{major}.{minor}.{new_patch}"
-        else:
-            bb.warn(f"BASE_ADU_SOFTWARE_VERSION '{base_version}' not in x.y.z.w or x.y.z format, using as-is")
-            v2_version = base_version
-    except Exception as e:
-        bb.warn(f"Failed to increment version from '{base_version}': {e}")
-        v2_version = base_version
-    
-    d.setVar('ADU_SOFTWARE_VERSION', v2_version)
-    bb.note(f"v1 version: {base_version}, v2 version: {v2_version}")
-}
+# Version configuration
+# Override ADU_SOFTWARE_VERSION to 1.0.0.2 (second production release)
+# This forces adu-device-info-files to rebuild with this version
+ADU_SOFTWARE_VERSION = "1.0.0.2"
 
 # Image link name - used for stable filename references
 export IMAGE_LINK_NAME = "adu-update-image-v2"

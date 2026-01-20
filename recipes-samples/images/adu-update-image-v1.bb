@@ -9,10 +9,9 @@ require adu-update-image-common.inc
 DESCRIPTION = "ADU swupdate image v1 (baseline for delta)"
 
 # Version configuration
-# Use BASE_ADU_SOFTWARE_VERSION if set, otherwise default to 1.0.0.1
-# In CI/CD, set BASE_ADU_SOFTWARE_VERSION to your desired version (e.g., 2.3.4.5)
-BASE_ADU_SOFTWARE_VERSION ??= "1.0.0.1"
-ADU_SOFTWARE_VERSION = "${BASE_ADU_SOFTWARE_VERSION}"
+# Override ADU_SOFTWARE_VERSION to 1.0.0.1 (first production release)
+# This forces adu-device-info-files to rebuild with this version
+ADU_SOFTWARE_VERSION = "1.0.0.1"
 
 # Image link name - used for stable filename references
 export IMAGE_LINK_NAME = "adu-update-image-v1"

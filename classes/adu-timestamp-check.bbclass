@@ -15,7 +15,8 @@ python do_validate_timestamps() {
     bb.note("======================================================================")
     
     # Find base image rootfs timestamp
-    base_pattern = os.path.join(deploy_dir, 'adu-base-image*.rootfs.ext4.gz')
+    # Pattern matches both: adu-base-image*.rootfs.ext4.gz and adu-base-image*.ext4.gz
+    base_pattern = os.path.join(deploy_dir, 'adu-base-image*.ext4.gz')
     base_files = glob.glob(base_pattern)
     
     # Determine what artifacts to check based on recipe

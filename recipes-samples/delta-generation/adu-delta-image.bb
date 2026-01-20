@@ -6,6 +6,8 @@
 DESCRIPTION = "ADU Delta Update File Generator (v1->v2, v2->v3, v1->v3)"
 LICENSE = "CLOSED"
 
+# No SRC_URI needed - signing is done directly with openssl in bash function
+
 # Inherit timestamp validation to ensure deltas are rebuilt when base image changes
 # Only enabled when delta update feature is turned on (WITH_FEATURE_DELTA_UPDATE='1')
 # This prevents accidentally deploying delta files created from stale update packages
@@ -34,42 +36,210 @@ python do_clean_old_deploys() {
 
 addtask clean_old_deploys before do_deploy after do_generate_all_deltas
 
-# Depend on all versioned images
-# Using simplified Python delta generator instead of DiffGenTool to avoid cross-arch issues
-DEPENDS = "adu-update-image-v1 adu-update-image-v2 adu-update-image-v3"
+# Depend on all versioned images and native delta generation tools
+DEPENDS = "adu-update-image-v1 adu-update-image-v2 adu-update-image-v3 iot-hub-device-update-delta-diffgentool-native iot-hub-device-update-delta-processor-native"
 
 # Task-level dependencies for all delta generation tasks
-# Depend on do_deploy instead of do_swuimage to ensure SWU files are in DEPLOY_DIR_IMAGE
+# Depend on do_swuimage to ensure SWU files are built and deployed
+# AND on diffgentool-native and processor-native to ensure native tools are available
 do_generate_delta_v1_v2[depends] = "\
-    adu-update-image-v1:do_deploy \
-    adu-update-image-v2:do_deploy \
+    adu-update-image-v1:do_swuimage \
+    adu-update-image-v2:do_swuimage \
+    iot-hub-device-update-delta-diffgentool-native:do_populate_sysroot \
+    iot-hub-device-update-delta-processor-native:do_populate_sysroot \
 "
 
 do_generate_delta_v2_v3[depends] = "\
-    adu-update-image-v2:do_deploy \
-    adu-update-image-v3:do_deploy \
+    adu-update-image-v2:do_swuimage \
+    adu-update-image-v3:do_swuimage \
+    iot-hub-device-update-delta-diffgentool-native:do_populate_sysroot \
+    iot-hub-device-update-delta-processor-native:do_populate_sysroot \
 "
 
 do_generate_delta_v1_v3[depends] = "\
-    adu-update-image-v1:do_deploy \
-    adu-update-image-v3:do_deploy \
+    adu-update-image-v1:do_swuimage \
+    adu-update-image-v3:do_swuimage \
+    iot-hub-device-update-delta-diffgentool-native:do_populate_sysroot \
+    iot-hub-device-update-delta-processor-native:do_populate_sysroot \
 "
 
-# Include our simplified Python delta generator
-SRC_URI = "file://simple-delta-gen.py"
+# No SRC_URI needed - using native diffgentool binary
 
 # Native tools needed during build (host machine)
-# bsdiff-native provides bsdiff/bspatch binaries for delta generation during build
-DEPENDS += "bsdiff-native zstd-native cpio-native"
+# iot-hub-device-update-delta-diffgentool-native provides:
+#   - diffgentool binary (C# .NET executable) for creating PAMZ format diffs
+#   This uses Microsoft's official C# DiffGenTool implementation
+DEPENDS += "iot-hub-device-update-delta-diffgentool-native cpio-native"
 
-# Runtime dependencies for target image
-RDEPENDS:${PN} += "python3-core cpio bsdiff zstd gzip"
+# Runtime dependencies for target image (no Python or wrapper scripts needed)
+RDEPENDS:${PN} += "cpio"
 
-# Install the Python script
+# No install needed - diffgentool comes from native recipe
 do_install() {
-    install -d ${D}${bindir}
-    install -m 0755 ${WORKDIR}/simple-delta-gen.py ${D}${bindir}/
+    # Empty - C# diffgentool is provided by iot-hub-device-update-delta-diffgentool-native
+    :
 }
+
+# =============================================================================
+# RECOMPRESSION AND SIGNING TASKS
+# =============================================================================
+# These tasks create recompressed+signed SWU files for each version (v1, v2, v3)
+# By creating them in separate tasks, we avoid race conditions where multiple
+# delta generation tasks try to recompress the same file simultaneously
+# =============================================================================
+
+python do_recompress_and_sign_v1() {
+    bb.note("=" * 70)
+    bb.note("Recompressing and signing v1 SWU file")
+    bb.note("=" * 70)
+    
+    deploy_dir = d.getVar('DEPLOY_DIR_IMAGE')
+    delta_output_dir = d.getVar('DELTA_OUTPUT_DIR')
+    
+    import glob
+    import subprocess
+    
+    # Find v1 SWU file
+    swu_files = glob.glob(f"{deploy_dir}/adu-update-image-v1-*.swu")
+    if not swu_files:
+        bb.fatal("No v1 SWU file found in %s" % deploy_dir)
+    
+    source_swu = swu_files[0]
+    bb.note(f"Found v1 SWU: {source_swu}")
+    
+    # Create output directory
+    os.makedirs(delta_output_dir, exist_ok=True)
+    
+    unsigned_swu = f"{delta_output_dir}/adu-update-image-v1.0.0-recompressed-unsigned.swu"
+    signed_swu = f"{delta_output_dir}/adu-update-image-v1.0.0-recompressed.swu"
+    
+    # Step 1: Recompress
+    bb.note("Step 1: Recompressing v1 SWU...")
+    bb.note(f"  Input:  {source_swu}")
+    bb.note(f"  Output: {unsigned_swu}")
+    
+    result = subprocess.run(['recompress', 'swu', source_swu, unsigned_swu],
+                          capture_output=True, text=True)
+    if result.returncode != 0:
+        bb.fatal(f"Recompression failed: {result.stderr}")
+    
+    # Step 2: Sign (call bash function from BitBake Python)
+    bb.note("Step 2: Signing recompressed v1 SWU...")
+    bb.note(f"  Input:  {unsigned_swu}")
+    bb.note(f"  Output: {signed_swu}")
+    
+    # Call sign_recompressed_swu bash function
+    bb.build.exec_func('sign_recompressed_swu_v1_wrapper', d)
+}
+
+# Wrapper bash function to call sign_recompressed_swu for v1
+sign_recompressed_swu_v1_wrapper() {
+    sign_recompressed_swu \
+        "${DELTA_OUTPUT_DIR}/adu-update-image-v1.0.0-recompressed-unsigned.swu" \
+        "${DELTA_OUTPUT_DIR}/adu-update-image-v1.0.0-recompressed.swu"
+}
+
+python do_recompress_and_sign_v2() {
+    bb.note("=" * 70)
+    bb.note("Recompressing and signing v2 SWU file")
+    bb.note("=" * 70)
+    
+    deploy_dir = d.getVar('DEPLOY_DIR_IMAGE')
+    delta_output_dir = d.getVar('DELTA_OUTPUT_DIR')
+    
+    import glob
+    import subprocess
+    
+    # Find v2 SWU file
+    swu_files = glob.glob(f"{deploy_dir}/adu-update-image-v2-*.swu")
+    if not swu_files:
+        bb.fatal("No v2 SWU file found in %s" % deploy_dir)
+    
+    source_swu = swu_files[0]
+    bb.note(f"Found v2 SWU: {source_swu}")
+    
+    # Create output directory
+    os.makedirs(delta_output_dir, exist_ok=True)
+    
+    unsigned_swu = f"{delta_output_dir}/adu-update-image-v2.0.0-recompressed-unsigned.swu"
+    signed_swu = f"{delta_output_dir}/adu-update-image-v2.0.0-recompressed.swu"
+    
+    # Step 1: Recompress
+    bb.note("Step 1: Recompressing v2 SWU...")
+    bb.note(f"  Input:  {source_swu}")
+    bb.note(f"  Output: {unsigned_swu}")
+    
+    result = subprocess.run(['recompress', 'swu', source_swu, unsigned_swu],
+                          capture_output=True, text=True)
+    if result.returncode != 0:
+        bb.fatal(f"Recompression failed: {result.stderr}")
+    
+    # Step 2: Sign
+    bb.note("Step 2: Signing recompressed v2 SWU...")
+    bb.note(f"  Input:  {unsigned_swu}")
+    bb.note(f"  Output: {signed_swu}")
+    
+    bb.build.exec_func('sign_recompressed_swu_v2_wrapper', d)
+}
+
+sign_recompressed_swu_v2_wrapper() {
+    sign_recompressed_swu \
+        "${DELTA_OUTPUT_DIR}/adu-update-image-v2.0.0-recompressed-unsigned.swu" \
+        "${DELTA_OUTPUT_DIR}/adu-update-image-v2.0.0-recompressed.swu"
+}
+
+python do_recompress_and_sign_v3() {
+    bb.note("=" * 70)
+    bb.note("Recompressing and signing v3 SWU file")
+    bb.note("=" * 70)
+    
+    deploy_dir = d.getVar('DEPLOY_DIR_IMAGE')
+    delta_output_dir = d.getVar('DELTA_OUTPUT_DIR')
+    
+    import glob
+    import subprocess
+    
+    # Find v3 SWU file
+    swu_files = glob.glob(f"{deploy_dir}/adu-update-image-v3-*.swu")
+    if not swu_files:
+        bb.fatal("No v3 SWU file found in %s" % deploy_dir)
+    
+    source_swu = swu_files[0]
+    bb.note(f"Found v3 SWU: {source_swu}")
+    
+    # Create output directory
+    os.makedirs(delta_output_dir, exist_ok=True)
+    
+    unsigned_swu = f"{delta_output_dir}/adu-update-image-v3.0.0-recompressed-unsigned.swu"
+    signed_swu = f"{delta_output_dir}/adu-update-image-v3.0.0-recompressed.swu"
+    
+    # Step 1: Recompress
+    bb.note("Step 1: Recompressing v3 SWU...")
+    bb.note(f"  Input:  {source_swu}")
+    bb.note(f"  Output: {unsigned_swu}")
+    
+    result = subprocess.run(['recompress', 'swu', source_swu, unsigned_swu],
+                          capture_output=True, text=True)
+    if result.returncode != 0:
+        bb.fatal(f"Recompression failed: {result.stderr}")
+    
+    # Step 2: Sign
+    bb.note("Step 2: Signing recompressed v3 SWU...")
+    bb.note(f"  Input:  {unsigned_swu}")
+    bb.note(f"  Output: {signed_swu}")
+    
+    bb.build.exec_func('sign_recompressed_swu_v3_wrapper', d)
+}
+
+sign_recompressed_swu_v3_wrapper() {
+    sign_recompressed_swu \
+        "${DELTA_OUTPUT_DIR}/adu-update-image-v3.0.0-recompressed-unsigned.swu" \
+        "${DELTA_OUTPUT_DIR}/adu-update-image-v3.0.0-recompressed.swu"
+}
+
+addtask recompress_and_sign_v1 after do_unpack before do_generate_delta_v1_v2
+addtask recompress_and_sign_v2 after do_unpack before do_generate_delta_v1_v2  
+addtask recompress_and_sign_v3 after do_unpack before do_generate_delta_v2_v3
 
 DELTA_OUTPUT_DIR = "${WORKDIR}/delta-output"
 DELTA_FILE_NAME_V1_V2 = "adu-delta-v1-to-v2.diff"
@@ -80,20 +250,152 @@ RECOMPRESSED_FILE_V2 = "adu-update-image-v2-recompressed.swu"
 RECOMPRESSED_FILE_V3 = "adu-update-image-v3-recompressed.swu"
 DEPLOYDIR = "${DEPLOY_DIR_IMAGE}"
 
-# Helper shell function to generate delta using DiffGenTool with all 6 required arguments
+# Export signing key paths to task environment
+# These are needed by the signing function
+do_recompress_and_sign_v1[vardeps] += "ADUC_PRIVATE_KEY ADUC_PRIVATE_KEY_PASSWORD"
+do_recompress_and_sign_v2[vardeps] += "ADUC_PRIVATE_KEY ADUC_PRIVATE_KEY_PASSWORD"
+do_recompress_and_sign_v3[vardeps] += "ADUC_PRIVATE_KEY ADUC_PRIVATE_KEY_PASSWORD"
+
+# Task dependencies: Recompression tasks depend on SWU files and native tools
+do_recompress_and_sign_v1[depends] = "\
+    adu-update-image-v1:do_swuimage \
+    iot-hub-device-update-delta-processor-native:do_populate_sysroot \
+"
+
+do_recompress_and_sign_v2[depends] = "\
+    adu-update-image-v2:do_swuimage \
+    iot-hub-device-update-delta-processor-native:do_populate_sysroot \
+"
+
+do_recompress_and_sign_v3[depends] = "\
+    adu-update-image-v3:do_swuimage \
+    iot-hub-device-update-delta-processor-native:do_populate_sysroot \
+"
+
+# Delta generation tasks depend on recompressed files (not original SWUs)
+# This ensures v1 is only recompressed once, avoiding race conditions
+do_generate_delta_v1_v2[depends] = "\
+    adu-delta-image:do_recompress_and_sign_v1 \
+    adu-delta-image:do_recompress_and_sign_v2 \
+    iot-hub-device-update-delta-diffgentool-native:do_populate_sysroot \
+"
+
+do_generate_delta_v2_v3[depends] = "\
+    adu-delta-image:do_recompress_and_sign_v2 \
+    adu-delta-image:do_recompress_and_sign_v3 \
+    iot-hub-device-update-delta-diffgentool-native:do_populate_sysroot \
+"
+
+do_generate_delta_v1_v3[depends] = "\
+    adu-delta-image:do_recompress_and_sign_v1 \
+    adu-delta-image:do_recompress_and_sign_v3 \
+    iot-hub-device-update-delta-diffgentool-native:do_populate_sysroot \
+"
+
+# Helper function to sign a recompressed SWU file
+# This function mimics the signing logic from swupdate-common.bbclass
+# It extracts the SWU, signs sw-description with openssl, and recreates the archive
+sign_recompressed_swu() {
+    local input_swu="$1"
+    local output_swu="$2"
+    
+    if [ ! -f "$input_swu" ]; then
+        bbfatal "Input SWU file not found: $input_swu"
+    fi
+    
+    # Create temporary directory for extraction
+    local temp_dir=$(mktemp -d)
+    
+    bbnote "  Extracting SWU to: $temp_dir"
+    
+    # Extract the CPIO archive
+    if ! (cd "$temp_dir" && cpio -idm < "$input_swu" 2>&1); then
+        rm -rf "$temp_dir"
+        bbfatal "Failed to extract SWU archive"
+    fi
+    
+    # Verify sw-description exists
+    if [ ! -f "$temp_dir/sw-description" ]; then
+        rm -rf "$temp_dir"
+        bbfatal "sw-description not found in SWU archive"
+    fi
+    
+    # Sign sw-description using the same openssl command as swupdate.bbclass
+    # This is the RSA signing method from swupdate-common.bbclass:
+    # openssl dgst -sha256 -sign <private_key> -passin file:<password_file> -out sw-description.sig sw-description
+    bbnote "  Signing sw-description with RSA private key"
+    if [ -f "${ADUC_PRIVATE_KEY_PASSWORD}" ]; then
+        if ! openssl dgst -sha256 -sign "${ADUC_PRIVATE_KEY}" \
+            -passin "file:${ADUC_PRIVATE_KEY_PASSWORD}" \
+            -out "$temp_dir/sw-description.sig" "$temp_dir/sw-description"; then
+            rm -rf "$temp_dir"
+            bbfatal "Failed to sign sw-description"
+        fi
+    else
+        # No password file - sign without password
+        if ! openssl dgst -sha256 -sign "${ADUC_PRIVATE_KEY}" \
+            -out "$temp_dir/sw-description.sig" "$temp_dir/sw-description"; then
+            rm -rf "$temp_dir"
+            bbfatal "Failed to sign sw-description"
+        fi
+    fi
+    
+    # Verify signature was created
+    if [ ! -f "$temp_dir/sw-description.sig" ]; then
+        rm -rf "$temp_dir"
+        bbfatal "Signature file was not created"
+    fi
+    
+    bbnote "  Signature created: sw-description.sig ($(stat -c%s $temp_dir/sw-description.sig) bytes)"
+    
+    # Get original file order from input SWU
+    # CRITICAL: Must maintain exact file order with sw-description first, then sw-description.sig
+    local file_list=$(cpio -it < "$input_swu" 2>/dev/null | grep -v "^$")
+    
+    # Create new SWU with signature
+    # The order MUST be: sw-description, sw-description.sig, <other files>
+    bbnote "  Creating signed SWU archive"
+    (
+        cd "$temp_dir"
+        # Always put sw-description first
+        echo "sw-description"
+        # Then sw-description.sig
+        echo "sw-description.sig"
+        # Then all other files (excluding sw-description which we already added)
+        echo "$file_list" | grep -v "^sw-description$" | grep -v "^sw-description.sig$"
+    ) | (cd "$temp_dir" && cpio -o -H newc > "$output_swu" 2>/dev/null)
+    
+    local cpio_result=$?
+    
+    rm -rf "$temp_dir"
+    
+    if [ $cpio_result -ne 0 ]; then
+        bbfatal "Failed to create signed SWU archive"
+    fi
+    
+    # Verify output file was created
+    if [ ! -f "$output_swu" ]; then
+        bbfatal "Signed SWU file was not created: $output_swu"
+    fi
+    
+    bbnote "  ✓ Signed SWU created: $(basename $output_swu) ($(stat -c%s $output_swu) bytes)"
+}
+
+# Helper shell function to generate delta using pre-created recompressed+signed SWU files
+# This function assumes the recompressed files already exist (created by do_recompress_and_sign_v* tasks)
 generate_delta_shell() {
-    local source_file="$1"
-    local target_file="$2"
+    local recompressed_source="$1"
+    local recompressed_target="$2"
     local delta_file="$3"
     local source_ver="$4"
     local target_ver="$5"
     
-    if [ ! -f "$source_file" ]; then
-        bbfatal "Source file not found: $source_file"
+    if [ ! -f "$recompressed_source" ]; then
+        bbfatal "Recompressed source file not found: $recompressed_source"
     fi
     
-    if [ ! -f "$target_file" ]; then
-        bbfatal "Target file not found: $target_file"
+    if [ ! -f "$recompressed_target" ]; then
+        bbfatal "Recompressed target file not found: $recompressed_target"
     fi
     
     mkdir -p ${DELTA_OUTPUT_DIR}
@@ -106,31 +408,25 @@ generate_delta_shell() {
     bbnote "====================================="
     bbnote "Generating delta from v$source_ver to v$target_ver"
     bbnote "====================================="
-    bbnote "  Source: $source_file"
-    bbnote "  Target: $target_file"
+    bbnote "  Source (recompressed+signed): $recompressed_source"
+    bbnote "  Target (recompressed+signed): $recompressed_target"
     bbnote "  Delta:  ${DELTA_OUTPUT_DIR}/$delta_file"
-    bbnote "  Recompressed: ${DELTA_OUTPUT_DIR}/$recompressed_file"
     bbnote "  Logs: $logs_dir"
     bbnote "  Working: $work_dir"
-    bbnote "  Tool: simple-delta-gen.py (Python)"
+    bbnote "  Tool: diffgentool (C# .NET using libadudiffapi.so P/Invoke)"
     bbnote "====================================="
     
-    # Generate delta using our simplified Python script
-    # This avoids cross-architecture issues with .NET and native binaries
-    # Uses host-native tools: cpio, bsdiff, zstd/gzip
-    # Add /usr/bin to PATH so system bsdiff is available
-    export PATH="/usr/bin:${PATH}"
-    python3 ${WORKDIR}/simple-delta-gen.py \
-        "$source_file" \
-        "$target_file" \
-        "${DELTA_OUTPUT_DIR}/$delta_file" \
-        "$logs_dir" \
-        "$work_dir" \
-        "${DELTA_OUTPUT_DIR}/$recompressed_file"
+    # Set LD_LIBRARY_PATH so diffgentool can find libadudiffapi.so
+    export LD_LIBRARY_PATH="${STAGING_LIBDIR_NATIVE}:${LD_LIBRARY_PATH}"
+    export PATH="${STAGING_BINDIR_NATIVE}:${PATH}"
     
-    if [ $? -ne 0 ]; then
-        bbfatal "Delta generation failed for v$source_ver to v$target_ver"
-    fi
+    # Generate delta using C# DiffGenTool (calls libadudiffapi.so via P/Invoke)
+    diffgentool \
+        "$recompressed_source" \
+        "$recompressed_target" \
+        "${DELTA_OUTPUT_DIR}/$delta_file" \
+        "$work_dir" \
+        || bbfatal "diffgentool failed"
     
     # Verify delta file was created
     if [ ! -f "${DELTA_OUTPUT_DIR}/$delta_file" ]; then
@@ -138,16 +434,12 @@ generate_delta_shell() {
     fi
     
     # Get file sizes and hashes
-    SOURCE_SIZE=$(stat -c%s "$source_file")
-    TARGET_SIZE=$(stat -c%s "$target_file")
+    SOURCE_SIZE=$(stat -c%s "$recompressed_source")
+    TARGET_SIZE=$(stat -c%s "$recompressed_target")
     DELTA_SIZE=$(stat -c%s "${DELTA_OUTPUT_DIR}/$delta_file")
-    SOURCE_HASH=$(sha256sum "$source_file" | awk '{print $1}')
-    TARGET_HASH=$(sha256sum "$target_file" | awk '{print $1}')
+    SOURCE_HASH=$(sha256sum "$recompressed_source" | awk '{print $1}')
+    TARGET_HASH=$(sha256sum "$recompressed_target" | awk '{print $1}')
     DELTA_HASH=$(sha256sum "${DELTA_OUTPUT_DIR}/$delta_file" | awk '{print $1}')
-    
-    # Get recompressed file info (if it exists)
-    RECOMPRESSED_SIZE=0
-    RECOMPRESSED_HASH=""
     if [ -f "${DELTA_OUTPUT_DIR}/$recompressed_file" ]; then
         RECOMPRESSED_SIZE=$(stat -c%s "${DELTA_OUTPUT_DIR}/$recompressed_file")
         RECOMPRESSED_HASH=$(sha256sum "${DELTA_OUTPUT_DIR}/$recompressed_file" | awk '{print $1}')
@@ -200,68 +492,33 @@ EOF
 do_generate_delta_v1_v2() {
     # Add native tools to PATH
     export PATH="${STAGING_BINDIR_NATIVE}:${PATH}"
+    export LD_LIBRARY_PATH="${STAGING_LIBDIR_NATIVE}:${LD_LIBRARY_PATH}"
     
     bbnote "======================================================================"
     bbnote "TASK: do_generate_delta_v1_v2"
-    bbnote "RECIPE: ${PN}"
-    bbnote "Searching for SWU files in DEPLOY_DIR_IMAGE: ${DEPLOY_DIR_IMAGE}"
+    bbnote "Using pre-created recompressed+signed SWU files"
     bbnote "======================================================================"
     
-    # List ALL .swu files in DEPLOY_DIR_IMAGE for debugging
-    bbnote "All .swu files in DEPLOY_DIR_IMAGE:"
-    ls -lh ${DEPLOY_DIR_IMAGE}/*.swu 2>/dev/null | while read line; do bbnote "  $line"; done || bbnote "  No .swu files found!"
+    # Use pre-created recompressed files from do_recompress_and_sign_v* tasks
+    RECOMPRESSED_V1="${DELTA_OUTPUT_DIR}/adu-update-image-v1.0.0-recompressed.swu"
+    RECOMPRESSED_V2="${DELTA_OUTPUT_DIR}/adu-update-image-v2.0.0-recompressed.swu"
     
-    bbnote "Searching for adu-update-image-v* files specifically:"
-    find ${DEPLOY_DIR_IMAGE} -maxdepth 1 -name 'adu-update-image-v*.swu' 2>/dev/null | while read file; do bbnote "  Found: $file"; done || bbnote "  No versioned update image files found!"
-    
-    # Find SWU files at task execution time
-    SWU_V1_FILE=$(find ${DEPLOY_DIR_IMAGE} -maxdepth 1 -name 'adu-update-image-v1-*.swu' -type f | head -n1)
-    SWU_V2_FILE=$(find ${DEPLOY_DIR_IMAGE} -maxdepth 1 -name 'adu-update-image-v2-*.swu' -type f | head -n1)
-    
-    bbnote "Search results:"
-    bbnote "  SWU_V1_FILE: $SWU_V1_FILE"
-    bbnote "  SWU_V2_FILE: $SWU_V2_FILE"
-    
-    if [ -z "$SWU_V1_FILE" ] || [ -z "$SWU_V2_FILE" ]; then
-        bberror "======================================================================"
-        bberror "ERROR: SWU files not found for v1->v2 delta generation"
-        bberror "  v1: $SWU_V1_FILE"
-        bberror "  v2: $SWU_V2_FILE"
-        bberror "This means the SWU files were not deployed to DEPLOY_DIR_IMAGE"
-        bberror "Possible causes:"
-        bberror "  1. do_swuimage tasks did not complete successfully"
-        bberror "  2. do_deploy tasks in bbappend did not run or failed"
-        bberror "  3. Files were cleaned by another task"
-        bberror "  4. sstate mechanism did not restore deployed files"
-        bberror "======================================================================"
-        bbfatal "SWU files not found: v1=$SWU_V1_FILE v2=$SWU_V2_FILE"
+    if [ ! -f "$RECOMPRESSED_V1" ]; then
+        bbfatal "Recompressed v1 file not found: $RECOMPRESSED_V1 (should be created by do_recompress_and_sign_v1)"
     fi
     
-    bbnote "Proceeding with delta generation: v1 -> v2"
-    # CRITICAL: For consistent delta chaining, ALL deltas must use recompressed sources!
-    # v1→v2: recompressed-v1 + diff → recompressed-v2
-    # v2→v3: recompressed-v2 + diff → recompressed-v3
-    # This ensures the device always has recompressed versions after each update.
+    if [ ! -f "$RECOMPRESSED_V2" ]; then
+        bbfatal "Recompressed v2 file not found: $RECOMPRESSED_V2 (should be created by do_recompress_and_sign_v2)"
+    fi
     
-    recompressed_file="${RECOMPRESSED_FILE_V2}"
+    bbnote "Using recompressed files:"
+    bbnote "  v1: $RECOMPRESSED_V1"
+    bbnote "  v2: $RECOMPRESSED_V2"
+    
     delta_file="${DELTA_FILE_NAME_V1_V2}"
     
-    # First, create recompressed v1 (this becomes the delta source)
-    RECOMPRESSED_V1_PATH="${DELTA_OUTPUT_DIR}/${RECOMPRESSED_FILE_V1}"
-    bbnote "Creating recompressed v1 (source for delta)..."
-    python3 ${WORKDIR}/simple-delta-gen.py \
-        "$SWU_V1_FILE" \
-        "$SWU_V1_FILE" \
-        "${DELTA_OUTPUT_DIR}/dummy-v1-to-v1.diff" \
-        "${DELTA_OUTPUT_DIR}/logs-v1-recompress" \
-        "${DELTA_OUTPUT_DIR}/working-v1-recompress" \
-        "$RECOMPRESSED_V1_PATH" || bbfatal "Failed to create v1-recompressed"
-    
-    bbnote "Recompressed v1 created: $RECOMPRESSED_V1_PATH"
-    
-    # Generate v1→v2 delta using recompressed-v1 as source
-    bbnote "Generating delta from recompressed-v1 to recompressed-v2..."
-    generate_delta_shell "$RECOMPRESSED_V1_PATH" "$SWU_V2_FILE" \
+    # Generate v1→v2 delta from recompressed+signed files
+    generate_delta_shell "$RECOMPRESSED_V1" "$RECOMPRESSED_V2" \
         "$delta_file" "1.0.0" "2.0.0"
 }
 
@@ -271,55 +528,33 @@ addtask generate_delta_v1_v2 after do_unpack before do_test_delta_v1_v2
 do_generate_delta_v2_v3() {
     # Add native tools to PATH
     export PATH="${STAGING_BINDIR_NATIVE}:${PATH}"
+    export LD_LIBRARY_PATH="${STAGING_LIBDIR_NATIVE}:${LD_LIBRARY_PATH}"
     
     bbnote "======================================================================"
     bbnote "TASK: do_generate_delta_v2_v3"
-    bbnote "RECIPE: ${PN}"
-    bbnote "Searching for SWU files in DEPLOY_DIR_IMAGE: ${DEPLOY_DIR_IMAGE}"
-    bbnote "====================================================================="
+    bbnote "Using pre-created recompressed+signed SWU files"
+    bbnote "======================================================================"
     
-    # List ALL .swu files in DEPLOY_DIR_IMAGE for debugging
-    bbnote "All .swu files in DEPLOY_DIR_IMAGE:"
-    ls -lh ${DEPLOY_DIR_IMAGE}/*.swu 2>/dev/null | while read line; do bbnote "  $line"; done || bbnote "  No .swu files found!"
+    # Use pre-created recompressed files from do_recompress_and_sign_v* tasks
+    RECOMPRESSED_V2="${DELTA_OUTPUT_DIR}/adu-update-image-v2.0.0-recompressed.swu"
+    RECOMPRESSED_V3="${DELTA_OUTPUT_DIR}/adu-update-image-v3.0.0-recompressed.swu"
     
-    # Find SWU files at task execution time
-    SWU_V2_FILE=$(find ${DEPLOY_DIR_IMAGE} -maxdepth 1 -name 'adu-update-image-v2-*.swu' -type f | head -n1)
-    SWU_V3_FILE=$(find ${DEPLOY_DIR_IMAGE} -maxdepth 1 -name 'adu-update-image-v3-*.swu' -type f | head -n1)
-    
-    bbnote "Search results:"
-    bbnote "  SWU_V2_FILE: $SWU_V2_FILE"
-    bbnote "  SWU_V3_FILE: $SWU_V3_FILE"
-    
-    if [ -z "$SWU_V2_FILE" ] || [ -z "$SWU_V3_FILE" ]; then
-        bberror "======================================================================"
-        bberror "ERROR: SWU files not found for v2->v3 delta generation"
-        bberror "  v2: $SWU_V2_FILE"
-        bberror "  v3: $SWU_V3_FILE"
-        bberror "======================================================================"
-        bbfatal "SWU files not found: v2=$SWU_V2_FILE v3=$SWU_V3_FILE"
+    if [ ! -f "$RECOMPRESSED_V2" ]; then
+        bbfatal "Recompressed v2 file not found: $RECOMPRESSED_V2 (should be created by do_recompress_and_sign_v2)"
     fi
     
-    bbnote "Proceeding with delta generation: v2 -> v3"
-    # CRITICAL: Use recompressed-v2 as source since device has recompressed v2 after v1->v2 update!
-    # Check if recompressed v2 exists from previous delta generation
-    RECOMPRESSED_V2_PATH="${DELTA_OUTPUT_DIR}/${RECOMPRESSED_FILE_V2}"
-    
-    if [ ! -f "$RECOMPRESSED_V2_PATH" ]; then
-        bbwarn "Recompressed v2 not found, creating it now for proper delta chain..."
-        python3 ${WORKDIR}/simple-delta-gen.py \
-            "$SWU_V2_FILE" \
-            "$SWU_V2_FILE" \
-            "${DELTA_OUTPUT_DIR}/dummy-v2-to-v2.diff" \
-            "${DELTA_OUTPUT_DIR}/logs-v2-recompress" \
-            "${DELTA_OUTPUT_DIR}/working-v2-recompress" \
-            "$RECOMPRESSED_V2_PATH" || bbfatal "Failed to create v2-recompressed"
+    if [ ! -f "$RECOMPRESSED_V3" ]; then
+        bbfatal "Recompressed v3 file not found: $RECOMPRESSED_V3 (should be created by do_recompress_and_sign_v3)"
     fi
     
-    recompressed_file="${RECOMPRESSED_FILE_V3}"
+    bbnote "Using recompressed files:"
+    bbnote "  v2: $RECOMPRESSED_V2"
+    bbnote "  v3: $RECOMPRESSED_V3"
+    
     delta_file="${DELTA_FILE_NAME_V2_V3}"
     
-    # Use recompressed-v2 as source (not original v2!)
-    generate_delta_shell "$RECOMPRESSED_V2_PATH" "$SWU_V3_FILE" \
+    # Generate v2→v3 delta from recompressed+signed files
+    generate_delta_shell "$RECOMPRESSED_V2" "$RECOMPRESSED_V3" \
         "$delta_file" "2.0.0" "3.0.0"
 }
 
@@ -329,38 +564,33 @@ addtask generate_delta_v2_v3 after do_unpack before do_test_delta_v2_v3
 do_generate_delta_v1_v3() {
     # Add native tools to PATH
     export PATH="${STAGING_BINDIR_NATIVE}:${PATH}"
+    export LD_LIBRARY_PATH="${STAGING_LIBDIR_NATIVE}:${LD_LIBRARY_PATH}"
     
     bbnote "======================================================================"
     bbnote "TASK: do_generate_delta_v1_v3"
-    bbnote "RECIPE: ${PN}"
-    bbnote "Searching for SWU files in DEPLOY_DIR_IMAGE: ${DEPLOY_DIR_IMAGE}"
-    bbnote "====================================================================="
+    bbnote "Using pre-created recompressed+signed SWU files"
+    bbnote "======================================================================"
     
-    # List ALL .swu files in DEPLOY_DIR_IMAGE for debugging
-    bbnote "All .swu files in DEPLOY_DIR_IMAGE:"
-    ls -lh ${DEPLOY_DIR_IMAGE}/*.swu 2>/dev/null | while read line; do bbnote "  $line"; done || bbnote "  No .swu files found!"
+    # Use pre-created recompressed files from do_recompress_and_sign_v* tasks
+    RECOMPRESSED_V1="${DELTA_OUTPUT_DIR}/adu-update-image-v1.0.0-recompressed.swu"
+    RECOMPRESSED_V3="${DELTA_OUTPUT_DIR}/adu-update-image-v3.0.0-recompressed.swu"
     
-    # Find SWU files at task execution time
-    SWU_V1_FILE=$(find ${DEPLOY_DIR_IMAGE} -maxdepth 1 -name 'adu-update-image-v1-*.swu' -type f | head -n1)
-    SWU_V3_FILE=$(find ${DEPLOY_DIR_IMAGE} -maxdepth 1 -name 'adu-update-image-v3-*.swu' -type f | head -n1)
-    
-    bbnote "Search results:"
-    bbnote "  SWU_V1_FILE: $SWU_V1_FILE"
-    bbnote "  SWU_V3_FILE: $SWU_V3_FILE"
-    
-    if [ -z "$SWU_V1_FILE" ] || [ -z "$SWU_V3_FILE" ]; then
-        bberror "======================================================================"
-        bberror "ERROR: SWU files not found for v1->v3 delta generation"
-        bberror "  v1: $SWU_V1_FILE"
-        bberror "  v3: $SWU_V3_FILE"
-        bberror "======================================================================"
-        bbfatal "SWU files not found: v1=$SWU_V1_FILE v3=$SWU_V3_FILE"
+    if [ ! -f "$RECOMPRESSED_V1" ]; then
+        bbfatal "Recompressed v1 file not found: $RECOMPRESSED_V1 (should be created by do_recompress_and_sign_v1)"
     fi
     
-    bbnote "Proceeding with delta generation: v1 -> v3"
-    recompressed_file="${RECOMPRESSED_FILE_V3}"
+    if [ ! -f "$RECOMPRESSED_V3" ]; then
+        bbfatal "Recompressed v3 file not found: $RECOMPRESSED_V3 (should be created by do_recompress_and_sign_v3)"
+    fi
+    
+    bbnote "Using recompressed files:"
+    bbnote "  v1: $RECOMPRESSED_V1"
+    bbnote "  v3: $RECOMPRESSED_V3"
+    
     delta_file="${DELTA_FILE_NAME_V1_V3}"
-    generate_delta_shell "$SWU_V1_FILE" "$SWU_V3_FILE" \
+    
+    # Generate v1→v3 delta from recompressed+signed files
+    generate_delta_shell "$RECOMPRESSED_V1" "$RECOMPRESSED_V3" \
         "$delta_file" "1.0.0" "3.0.0"
 }
 
@@ -482,48 +712,82 @@ do_test_delta_v1_v2() {
     bbnote "====================================="
     
     DELTA_FILE="${DELTA_OUTPUT_DIR}/${DELTA_FILE_NAME_V1_V2}"
-    DELTA_FILE_DECOMPRESSED="${DELTA_OUTPUT_DIR}/delta-v1-v2.bsdiff"
-    RECONSTRUCTED="${DELTA_OUTPUT_DIR}/reconstructed-v2.swu"
-    RECOMPRESSED_V1="${DELTA_OUTPUT_DIR}/${RECOMPRESSED_FILE_V1}"
-    RECOMPRESSED_V2="${DELTA_OUTPUT_DIR}/${RECOMPRESSED_FILE_V2}"
+    RECOMPRESSED_V2="${DELTA_OUTPUT_DIR}/adu-update-image-v2.0.0-recompressed.swu"
     
-    # CRITICAL: Delta was generated from recompressed-v1, so test must use it too
+    # Validate PAMZ format (magic bytes: 50 41 4d 5a)
+    bbnote "Validating PAMZ format..."
+    if [ ! -f "$DELTA_FILE" ]; then
+        bbfatal "Delta file not found: $DELTA_FILE"
+    fi
+    
+    MAGIC=$(hexdump -n 4 -e '4/1 "%02x" "\n"' "$DELTA_FILE")
+    if [ "$MAGIC" != "50414d5a" ]; then
+        bbfatal "Invalid PAMZ magic bytes! Expected: 50414d5a, Got: $MAGIC"
+    fi
+    
+    bbnote "✓ PAMZ format validated (magic: $MAGIC)"
+    
+    # Verify recompressed target file exists
+    if [ ! -f "$RECOMPRESSED_V2" ]; then
+        bbfatal "Recompressed target not found: $RECOMPRESSED_V2"
+    fi
+    
+    DELTA_SIZE=$(stat -c%s "$DELTA_FILE")
+    RECOMP_SIZE=$(stat -c%s "$RECOMPRESSED_V2")
+    COMPRESSION=$(awk "BEGIN {printf \"%.2f\", ($DELTA_SIZE / $RECOMP_SIZE) * 100}")
+    
+    bbnote "✓ PAMZ format validated"
+    bbnote "  Delta size: $DELTA_SIZE bytes"
+    bbnote "  Recompressed target: $RECOMP_SIZE bytes"
+    bbnote "  Compression ratio: $COMPRESSION%"
+    
+    # Now apply the delta to verify it actually reconstructs correctly
+    bbnote ""
+    bbnote "Applying delta to verify reconstruction..."
+    
+    # Need recompressed source (v1)
+    RECOMPRESSED_V1="${DELTA_OUTPUT_DIR}/adu-update-image-v1.0.0-recompressed.swu"
     if [ ! -f "$RECOMPRESSED_V1" ]; then
-        bbfatal "Recompressed v1 not found! Cannot test v1->v2 delta. Path: $RECOMPRESSED_V1"
+        bbfatal "Recompressed source (v1) not found: $RECOMPRESSED_V1"
     fi
     
-    # Decompress zstd-compressed delta
-    bbnote "Decompressing delta file..."
-    zstd -d "$DELTA_FILE" -o "$DELTA_FILE_DECOMPRESSED"
+    RECONSTRUCTED="${DELTA_OUTPUT_DIR}/reconstructed-v2.swu"
     
-    bbnote "Applying delta patch from recompressed-v1..."
-    bspatch "$RECOMPRESSED_V1" "$RECONSTRUCTED" "$DELTA_FILE_DECOMPRESSED"
-    if [ $? -ne 0 ]; then
-        bbfatal "Delta patch failed to apply!"
+    # Set up library paths for applydiff
+    export LD_LIBRARY_PATH="${STAGING_LIBDIR_NATIVE}:${LD_LIBRARY_PATH}"
+    export PATH="${STAGING_BINDIR_NATIVE}:${PATH}"
+    
+    bbnote "  Source: $(basename $RECOMPRESSED_V1)"
+    bbnote "  Delta: $(basename $DELTA_FILE)"
+    bbnote "  Target: $(basename $RECOMPRESSED_V2)"
+    bbnote "  Reconstructing to: $(basename $RECONSTRUCTED)"
+    
+    # Apply delta using processor's applydiff tool
+    if ! applydiff "$RECOMPRESSED_V1" "$DELTA_FILE" "$RECONSTRUCTED"; then
+        bbfatal "Failed to apply delta! applydiff returned error."
     fi
     
-    # Compare against recompressed version (delta was generated from recompressed target)
-    if [ -f "$RECOMPRESSED_V2" ]; then
-        if cmp -s "$RECOMPRESSED_V2" "$RECONSTRUCTED"; then
-            bbnote "✓ SUCCESS: v1->v2 delta verified!"
-            V2_SHA256=$(sha256sum "$RECOMPRESSED_V2" | awk '{print $1}')
-            RECON_SHA256=$(sha256sum "$RECONSTRUCTED" | awk '{print $1}')
-            bbnote "  v2 recompressed SHA256: $V2_SHA256"
-            bbnote "  Reconstructed SHA256:   $RECON_SHA256"
-        else
-            bbfatal "FAILED: v1->v2 reconstructed image does NOT match recompressed!"
-        fi
+    # Verify reconstructed file matches expected target
+    if [ ! -f "$RECONSTRUCTED" ]; then
+        bbfatal "Reconstructed file was not created: $RECONSTRUCTED"
+    fi
+    
+    RECON_HASH=$(sha256sum "$RECONSTRUCTED" | awk '{print $1}')
+    TARGET_HASH=$(sha256sum "$RECOMPRESSED_V2" | awk '{print $1}')
+    
+    if [ "$RECON_HASH" = "$TARGET_HASH" ]; then
+        bbnote "✓ SUCCESS: Reconstruction verified!"
+        bbnote "  SHA256: $RECON_HASH"
     else
-        bbwarn "Recompressed file not found, comparing against original"
-        if cmp -s "$SWU_V2" "$RECONSTRUCTED"; then
-            bbnote "✓ SUCCESS: v1->v2 delta verified (original)!"
-        else
-            bbfatal "FAILED: v1->v2 reconstructed image does NOT match!"
-        fi
+        bberror "FAILED: Reconstructed file does not match target!"
+        bberror "  Expected: $TARGET_HASH"
+        bberror "  Got:      $RECON_HASH"
+        bbfatal "Delta reconstruction verification failed"
     fi
     
+    # Clean up
+    rm -f "$RECONSTRUCTED"
     bbnote "====================================="
-    rm -f "$RECONSTRUCTED" "$DELTA_FILE_DECOMPRESSED"
     
     # Generate import manifest for this delta
     generate_import_manifest "$SWU_V1" "$SWU_V2" \
@@ -551,49 +815,82 @@ do_test_delta_v2_v3() {
     bbnote "====================================="
     
     DELTA_FILE="${DELTA_OUTPUT_DIR}/${DELTA_FILE_NAME_V2_V3}"
-    DELTA_FILE_DECOMPRESSED="${DELTA_OUTPUT_DIR}/delta-v2-v3.bsdiff"
-    RECONSTRUCTED="${DELTA_OUTPUT_DIR}/reconstructed-v3.swu"
-    RECOMPRESSED_V2="${DELTA_OUTPUT_DIR}/${RECOMPRESSED_FILE_V2}"
-    RECOMPRESSED_V3="${DELTA_OUTPUT_DIR}/${RECOMPRESSED_FILE_V3}"
+    RECOMPRESSED_V3="${DELTA_OUTPUT_DIR}/adu-update-image-v3.0.0-recompressed.swu"
     
-    # CRITICAL: Use recompressed-v2 as source (not original v2!)
-    # The delta was generated from recompressed-v2 to recompressed-v3
+    # Validate PAMZ format (magic bytes: 50 41 4d 5a)
+    bbnote "Validating PAMZ format..."
+    if [ ! -f "$DELTA_FILE" ]; then
+        bbfatal "Delta file not found: $DELTA_FILE"
+    fi
+    
+    MAGIC=$(hexdump -n 4 -e '4/1 "%02x" "\n"' "$DELTA_FILE")
+    if [ "$MAGIC" != "50414d5a" ]; then
+        bbfatal "Invalid PAMZ magic bytes! Expected: 50414d5a, Got: $MAGIC"
+    fi
+    
+    bbnote "✓ PAMZ format validated (magic: $MAGIC)"
+    
+    # Verify recompressed target file exists
+    if [ ! -f "$RECOMPRESSED_V3" ]; then
+        bbfatal "Recompressed target not found: $RECOMPRESSED_V3"
+    fi
+    
+    DELTA_SIZE=$(stat -c%s "$DELTA_FILE")
+    RECOMP_SIZE=$(stat -c%s "$RECOMPRESSED_V3")
+    COMPRESSION=$(awk "BEGIN {printf \"%.2f\", ($DELTA_SIZE / $RECOMP_SIZE) * 100}")
+    
+    bbnote "✓ PAMZ format validated"
+    bbnote "  Delta size: $DELTA_SIZE bytes"
+    bbnote "  Recompressed target: $RECOMP_SIZE bytes"
+    bbnote "  Compression ratio: $COMPRESSION%"
+    
+    # Now apply the delta to verify it actually reconstructs correctly
+    bbnote ""
+    bbnote "Applying delta to verify reconstruction..."
+    
+    # Need recompressed source (v2)
+    RECOMPRESSED_V2="${DELTA_OUTPUT_DIR}/adu-update-image-v2.0.0-recompressed.swu"
     if [ ! -f "$RECOMPRESSED_V2" ]; then
-        bbfatal "Recompressed v2 not found! Cannot test v2->v3 delta. Path: $RECOMPRESSED_V2"
+        bbfatal "Recompressed source (v2) not found: $RECOMPRESSED_V2"
     fi
     
-    # Decompress zstd-compressed delta
-    bbnote "Decompressing delta file..."
-    zstd -d "$DELTA_FILE" -o "$DELTA_FILE_DECOMPRESSED"
+    RECONSTRUCTED="${DELTA_OUTPUT_DIR}/reconstructed-v3.swu"
     
-    bbnote "Applying delta patch from recompressed-v2..."
-    bspatch "$RECOMPRESSED_V2" "$RECONSTRUCTED" "$DELTA_FILE_DECOMPRESSED"
-    if [ $? -ne 0 ]; then
-        bbfatal "Delta patch failed to apply!"
+    # Set up library paths for applydiff
+    export LD_LIBRARY_PATH="${STAGING_LIBDIR_NATIVE}:${LD_LIBRARY_PATH}"
+    export PATH="${STAGING_BINDIR_NATIVE}:${PATH}"
+    
+    bbnote "  Source: $(basename $RECOMPRESSED_V2)"
+    bbnote "  Delta: $(basename $DELTA_FILE)"
+    bbnote "  Target: $(basename $RECOMPRESSED_V3)"
+    bbnote "  Reconstructing to: $(basename $RECONSTRUCTED)"
+    
+    # Apply delta using processor's applydiff tool
+    if ! applydiff "$RECOMPRESSED_V2" "$DELTA_FILE" "$RECONSTRUCTED"; then
+        bbfatal "Failed to apply delta! applydiff returned error."
     fi
     
-    # Compare against recompressed version (delta was generated from recompressed target)
-    if [ -f "$RECOMPRESSED_V3" ]; then
-        if cmp -s "$RECOMPRESSED_V3" "$RECONSTRUCTED"; then
-            bbnote "✓ SUCCESS: v2->v3 delta verified!"
-            V3_SHA256=$(sha256sum "$RECOMPRESSED_V3" | awk '{print $1}')
-            RECON_SHA256=$(sha256sum "$RECONSTRUCTED" | awk '{print $1}')
-            bbnote "  v3 recompressed SHA256: $V3_SHA256"
-            bbnote "  Reconstructed SHA256:   $RECON_SHA256"
-        else
-            bbfatal "FAILED: v2->v3 reconstructed image does NOT match recompressed!"
-        fi
+    # Verify reconstructed file matches expected target
+    if [ ! -f "$RECONSTRUCTED" ]; then
+        bbfatal "Reconstructed file was not created: $RECONSTRUCTED"
+    fi
+    
+    RECON_HASH=$(sha256sum "$RECONSTRUCTED" | awk '{print $1}')
+    TARGET_HASH=$(sha256sum "$RECOMPRESSED_V3" | awk '{print $1}')
+    
+    if [ "$RECON_HASH" = "$TARGET_HASH" ]; then
+        bbnote "✓ SUCCESS: Reconstruction verified!"
+        bbnote "  SHA256: $RECON_HASH"
     else
-        bbwarn "Recompressed file not found, comparing against original"
-        if cmp -s "$SWU_V3" "$RECONSTRUCTED"; then
-            bbnote "✓ SUCCESS: v2->v3 delta verified (original)!"
-        else
-            bbfatal "FAILED: v2->v3 reconstructed image does NOT match!"
-        fi
+        bberror "FAILED: Reconstructed file does not match target!"
+        bberror "  Expected: $TARGET_HASH"
+        bberror "  Got:      $RECON_HASH"
+        bbfatal "Delta reconstruction verification failed"
     fi
     
+    # Clean up
+    rm -f "$RECONSTRUCTED"
     bbnote "====================================="
-    rm -f "$RECONSTRUCTED" "$DELTA_FILE_DECOMPRESSED"
     
     # Generate import manifest for this delta
     generate_import_manifest "$SWU_V2" "$SWU_V3" \
@@ -621,42 +918,82 @@ do_test_delta_v1_v3() {
     bbnote "====================================="
     
     DELTA_FILE="${DELTA_OUTPUT_DIR}/${DELTA_FILE_NAME_V1_V3}"
-    DELTA_FILE_DECOMPRESSED="${DELTA_OUTPUT_DIR}/delta-v1-v3.bsdiff"
+    RECOMPRESSED_V3="${DELTA_OUTPUT_DIR}/adu-update-image-v3.0.0-recompressed.swu"
+    
+    # Validate PAMZ format (magic bytes: 50 41 4d 5a)
+    bbnote "Validating PAMZ format..."
+    if [ ! -f "$DELTA_FILE" ]; then
+        bbfatal "Delta file not found: $DELTA_FILE"
+    fi
+    
+    MAGIC=$(hexdump -n 4 -e '4/1 "%02x" "\n"' "$DELTA_FILE")
+    if [ "$MAGIC" != "50414d5a" ]; then
+        bbfatal "Invalid PAMZ magic bytes! Expected: 50414d5a, Got: $MAGIC"
+    fi
+    
+    bbnote "✓ PAMZ format validated (magic: $MAGIC)"
+    
+    # Verify recompressed target file exists
+    if [ ! -f "$RECOMPRESSED_V3" ]; then
+        bbfatal "Recompressed target not found: $RECOMPRESSED_V3"
+    fi
+    
+    DELTA_SIZE=$(stat -c%s "$DELTA_FILE")
+    RECOMP_SIZE=$(stat -c%s "$RECOMPRESSED_V3")
+    COMPRESSION=$(awk "BEGIN {printf \"%.2f\", ($DELTA_SIZE / $RECOMP_SIZE) * 100}")
+    
+    bbnote "✓ PAMZ format validated"
+    bbnote "  Delta size: $DELTA_SIZE bytes"
+    bbnote "  Recompressed target: $RECOMP_SIZE bytes"
+    bbnote "  Compression ratio: $COMPRESSION%"
+    
+    # Now apply the delta to verify it actually reconstructs correctly
+    bbnote ""
+    bbnote "Applying delta to verify reconstruction..."
+    
+    # Need recompressed source (v1)
+    RECOMPRESSED_V1="${DELTA_OUTPUT_DIR}/adu-update-image-v1.0.0-recompressed.swu"
+    if [ ! -f "$RECOMPRESSED_V1" ]; then
+        bbfatal "Recompressed source (v1) not found: $RECOMPRESSED_V1"
+    fi
+    
     RECONSTRUCTED="${DELTA_OUTPUT_DIR}/reconstructed-v3-from-v1.swu"
-    RECOMPRESSED_V3="${DELTA_OUTPUT_DIR}/${RECOMPRESSED_FILE_V3}"
     
-    # Decompress zstd-compressed delta
-    bbnote "Decompressing delta file..."
-    zstd -d "$DELTA_FILE" -o "$DELTA_FILE_DECOMPRESSED"
+    # Set up library paths for applydiff
+    export LD_LIBRARY_PATH="${STAGING_LIBDIR_NATIVE}:${LD_LIBRARY_PATH}"
+    export PATH="${STAGING_BINDIR_NATIVE}:${PATH}"
     
-    bbnote "Applying delta patch..."
-    bspatch "$SWU_V1" "$RECONSTRUCTED" "$DELTA_FILE_DECOMPRESSED"
-    if [ $? -ne 0 ]; then
-        bbfatal "Delta patch failed to apply!"
+    bbnote "  Source: $(basename $RECOMPRESSED_V1)"
+    bbnote "  Delta: $(basename $DELTA_FILE)"
+    bbnote "  Target: $(basename $RECOMPRESSED_V3)"
+    bbnote "  Reconstructing to: $(basename $RECONSTRUCTED)"
+    
+    # Apply delta using processor's applydiff tool
+    if ! applydiff "$RECOMPRESSED_V1" "$DELTA_FILE" "$RECONSTRUCTED"; then
+        bbfatal "Failed to apply delta! applydiff returned error."
     fi
     
-    # Compare against recompressed version (delta was generated from recompressed target)
-    if [ -f "$RECOMPRESSED_V3" ]; then
-        if cmp -s "$RECOMPRESSED_V3" "$RECONSTRUCTED"; then
-            bbnote "✓ SUCCESS: v1->v3 delta verified!"
-            V3_SHA256=$(sha256sum "$RECOMPRESSED_V3" | awk '{print $1}')
-            RECON_SHA256=$(sha256sum "$RECONSTRUCTED" | awk '{print $1}')
-            bbnote "  v3 recompressed SHA256: $V3_SHA256"
-            bbnote "  Reconstructed SHA256:   $RECON_SHA256"
-        else
-            bbfatal "FAILED: v1->v3 reconstructed image does NOT match recompressed!"
-        fi
+    # Verify reconstructed file matches expected target
+    if [ ! -f "$RECONSTRUCTED" ]; then
+        bbfatal "Reconstructed file was not created: $RECONSTRUCTED"
+    fi
+    
+    RECON_HASH=$(sha256sum "$RECONSTRUCTED" | awk '{print $1}')
+    TARGET_HASH=$(sha256sum "$RECOMPRESSED_V3" | awk '{print $1}')
+    
+    if [ "$RECON_HASH" = "$TARGET_HASH" ]; then
+        bbnote "✓ SUCCESS: Reconstruction verified!"
+        bbnote "  SHA256: $RECON_HASH"
     else
-        bbwarn "Recompressed file not found, comparing against original"
-        if cmp -s "$SWU_V3" "$RECONSTRUCTED"; then
-            bbnote "✓ SUCCESS: v1->v3 delta verified (original)!"
-        else
-            bbfatal "FAILED: v1->v3 reconstructed image does NOT match!"
-        fi
+        bberror "FAILED: Reconstructed file does not match target!"
+        bberror "  Expected: $TARGET_HASH"
+        bberror "  Got:      $RECON_HASH"
+        bbfatal "Delta reconstruction verification failed"
     fi
     
+    # Clean up
+    rm -f "$RECONSTRUCTED"
     bbnote "====================================="
-    rm -f "$RECONSTRUCTED" "$DELTA_FILE_DECOMPRESSED"
     
     # Generate import manifest for this delta (skip v2 path)
     generate_import_manifest "$SWU_V1" "$SWU_V3" \
@@ -766,7 +1103,249 @@ do_deploy() {
 do_deploy[depends] = ""
 do_deploy[dirs] = "${DEPLOYDIR}"
 do_deploy[umask] = "022"
-addtask deploy after do_test_delta_v1_v2 do_test_delta_v2_v3 do_test_delta_v1_v3 before do_build
+# Deploy after delta verification
+addtask deploy after do_verify_all_deltas before do_build
+
+# Verify delta reconstruction using applydiff tool
+# This ensures that applying each delta to its source produces the exact target
+python do_verify_delta_v1_v2() {
+    import subprocess
+    import os
+    
+    delta_dir = d.getVar('DELTA_OUTPUT_DIR')
+    staging_bindir = d.getVar('STAGING_BINDIR_NATIVE')
+    staging_base = os.path.dirname(os.path.dirname(staging_bindir))
+    
+    source = os.path.join(delta_dir, 'adu-update-image-v1.0.0-recompressed.swu')
+    delta = os.path.join(delta_dir, 'adu-delta-v1-to-v2.diff')
+    target = os.path.join(delta_dir, 'adu-update-image-v2.0.0-recompressed.swu')
+    reconstructed = os.path.join(delta_dir, 'v2-reconstructed-verify.swu')
+    
+    bb.note("=" * 80)
+    bb.note("Verifying delta v1→v2 reconstruction")
+    bb.note("=" * 80)
+    
+    # Build LD_LIBRARY_PATH from all native lib directories
+    lib_paths = []
+    sysroots_components = os.path.join(staging_base, 'sysroots-components', 'x86_64')
+    if os.path.exists(sysroots_components):
+        for root, dirs, files in os.walk(sysroots_components):
+            if os.path.basename(root) == 'lib':
+                lib_paths.append(root)
+    
+    env = os.environ.copy()
+    env['LD_LIBRARY_PATH'] = ':'.join(lib_paths + [env.get('LD_LIBRARY_PATH', '')])
+    env['PATH'] = staging_bindir + ':' + env.get('PATH', '')
+    
+    # Run applydiff
+    cmd = ['applydiff', source, delta, reconstructed]
+    bb.note(f"Running: {' '.join(cmd)}")
+    
+    try:
+        result = subprocess.run(cmd, env=env, capture_output=True, text=True, check=True)
+        bb.note(result.stdout)
+        if result.stderr:
+            bb.note(result.stderr)
+    except subprocess.CalledProcessError as e:
+        bb.fatal(f"applydiff failed: {e.stderr}")
+    
+    # Verify reconstruction matches target
+    if not os.path.exists(reconstructed):
+        bb.fatal("Reconstructed file was not created")
+    
+    # Compare SHA256 hashes
+    import hashlib
+    def sha256_file(path):
+        h = hashlib.sha256()
+        with open(path, 'rb') as f:
+            for chunk in iter(lambda: f.read(8192), b''):
+                h.update(chunk)
+        return h.hexdigest()
+    
+    reconstructed_hash = sha256_file(reconstructed)
+    target_hash = sha256_file(target)
+    
+    bb.note(f"Reconstructed SHA256: {reconstructed_hash}")
+    bb.note(f"Target SHA256:        {target_hash}")
+    
+    if reconstructed_hash == target_hash:
+        bb.note("✅ SUCCESS: v1 + delta-v1-v2 = v2 (verified)")
+    else:
+        bb.fatal("❌ FAIL: Reconstructed file does not match target v2")
+    
+    # Clean up temporary file
+    os.remove(reconstructed)
+    bb.note("=" * 80)
+}
+
+python do_verify_delta_v2_v3() {
+    import subprocess
+    import os
+    
+    delta_dir = d.getVar('DELTA_OUTPUT_DIR')
+    staging_bindir = d.getVar('STAGING_BINDIR_NATIVE')
+    staging_base = os.path.dirname(os.path.dirname(staging_bindir))
+    
+    source = os.path.join(delta_dir, 'adu-update-image-v2.0.0-recompressed.swu')
+    delta = os.path.join(delta_dir, 'adu-delta-v2-to-v3.diff')
+    target = os.path.join(delta_dir, 'adu-update-image-v3.0.0-recompressed.swu')
+    reconstructed = os.path.join(delta_dir, 'v3-reconstructed-verify.swu')
+    
+    bb.note("=" * 80)
+    bb.note("Verifying delta v2→v3 reconstruction")
+    bb.note("=" * 80)
+    
+    # Build LD_LIBRARY_PATH from all native lib directories
+    lib_paths = []
+    sysroots_components = os.path.join(staging_base, 'sysroots-components', 'x86_64')
+    if os.path.exists(sysroots_components):
+        for root, dirs, files in os.walk(sysroots_components):
+            if os.path.basename(root) == 'lib':
+                lib_paths.append(root)
+    
+    env = os.environ.copy()
+    env['LD_LIBRARY_PATH'] = ':'.join(lib_paths + [env.get('LD_LIBRARY_PATH', '')])
+    env['PATH'] = staging_bindir + ':' + env.get('PATH', '')
+    
+    # Run applydiff
+    cmd = ['applydiff', source, delta, reconstructed]
+    bb.note(f"Running: {' '.join(cmd)}")
+    
+    try:
+        result = subprocess.run(cmd, env=env, capture_output=True, text=True, check=True)
+        bb.note(result.stdout)
+        if result.stderr:
+            bb.note(result.stderr)
+    except subprocess.CalledProcessError as e:
+        bb.fatal(f"applydiff failed: {e.stderr}")
+    
+    # Verify reconstruction matches target
+    if not os.path.exists(reconstructed):
+        bb.fatal("Reconstructed file was not created")
+    
+    # Compare SHA256 hashes
+    import hashlib
+    def sha256_file(path):
+        h = hashlib.sha256()
+        with open(path, 'rb') as f:
+            for chunk in iter(lambda: f.read(8192), b''):
+                h.update(chunk)
+        return h.hexdigest()
+    
+    reconstructed_hash = sha256_file(reconstructed)
+    target_hash = sha256_file(target)
+    
+    bb.note(f"Reconstructed SHA256: {reconstructed_hash}")
+    bb.note(f"Target SHA256:        {target_hash}")
+    
+    if reconstructed_hash == target_hash:
+        bb.note("✅ SUCCESS: v2 + delta-v2-v3 = v3 (verified)")
+    else:
+        bb.fatal("❌ FAIL: Reconstructed file does not match target v3")
+    
+    # Clean up temporary file
+    os.remove(reconstructed)
+    bb.note("=" * 80)
+}
+
+python do_verify_delta_v1_v3() {
+    import subprocess
+    import os
+    
+    delta_dir = d.getVar('DELTA_OUTPUT_DIR')
+    staging_bindir = d.getVar('STAGING_BINDIR_NATIVE')
+    staging_base = os.path.dirname(os.path.dirname(staging_bindir))
+    
+    source = os.path.join(delta_dir, 'adu-update-image-v1.0.0-recompressed.swu')
+    delta = os.path.join(delta_dir, 'adu-delta-v1-to-v3.diff')
+    target = os.path.join(delta_dir, 'adu-update-image-v3.0.0-recompressed.swu')
+    reconstructed = os.path.join(delta_dir, 'v3-from-v1-reconstructed-verify.swu')
+    
+    bb.note("=" * 80)
+    bb.note("Verifying delta v1→v3 reconstruction")
+    bb.note("=" * 80)
+    
+    # Build LD_LIBRARY_PATH from all native lib directories
+    lib_paths = []
+    sysroots_components = os.path.join(staging_base, 'sysroots-components', 'x86_64')
+    if os.path.exists(sysroots_components):
+        for root, dirs, files in os.walk(sysroots_components):
+            if os.path.basename(root) == 'lib':
+                lib_paths.append(root)
+    
+    env = os.environ.copy()
+    env['LD_LIBRARY_PATH'] = ':'.join(lib_paths + [env.get('LD_LIBRARY_PATH', '')])
+    env['PATH'] = staging_bindir + ':' + env.get('PATH', '')
+    
+    # Run applydiff
+    cmd = ['applydiff', source, delta, reconstructed]
+    bb.note(f"Running: {' '.join(cmd)}")
+    
+    try:
+        result = subprocess.run(cmd, env=env, capture_output=True, text=True, check=True)
+        bb.note(result.stdout)
+        if result.stderr:
+            bb.note(result.stderr)
+    except subprocess.CalledProcessError as e:
+        bb.fatal(f"applydiff failed: {e.stderr}")
+    
+    # Verify reconstruction matches target
+    if not os.path.exists(reconstructed):
+        bb.fatal("Reconstructed file was not created")
+    
+    # Compare SHA256 hashes
+    import hashlib
+    def sha256_file(path):
+        h = hashlib.sha256()
+        with open(path, 'rb') as f:
+            for chunk in iter(lambda: f.read(8192), b''):
+                h.update(chunk)
+        return h.hexdigest()
+    
+    reconstructed_hash = sha256_file(reconstructed)
+    target_hash = sha256_file(target)
+    
+    bb.note(f"Reconstructed SHA256: {reconstructed_hash}")
+    bb.note(f"Target SHA256:        {target_hash}")
+    
+    if reconstructed_hash == target_hash:
+        bb.note("✅ SUCCESS: v1 + delta-v1-v3 = v3 (verified)")
+    else:
+        bb.fatal("❌ FAIL: Reconstructed file does not match target v3")
+    
+    # Clean up temporary file
+    os.remove(reconstructed)
+    bb.note("=" * 80)
+}
+
+# Verification tasks depend on delta generation and applydiff tool
+do_verify_delta_v1_v2[depends] = "\
+    adu-delta-image:do_generate_delta_v1_v2 \
+    iot-hub-device-update-delta-processor-native:do_populate_sysroot \
+"
+
+do_verify_delta_v2_v3[depends] = "\
+    adu-delta-image:do_generate_delta_v2_v3 \
+    iot-hub-device-update-delta-processor-native:do_populate_sysroot \
+"
+
+do_verify_delta_v1_v3[depends] = "\
+    adu-delta-image:do_generate_delta_v1_v3 \
+    iot-hub-device-update-delta-processor-native:do_populate_sysroot \
+"
+
+addtask verify_delta_v1_v2 after do_generate_delta_v1_v2 before do_verify_all_deltas
+addtask verify_delta_v2_v3 after do_generate_delta_v2_v3 before do_verify_all_deltas
+addtask verify_delta_v1_v3 after do_generate_delta_v1_v3 before do_verify_all_deltas
+
+# Aggregate verification task
+python do_verify_all_deltas() {
+    bb.note("=" * 80)
+    bb.note("All delta verification tasks completed successfully!")
+    bb.note("=" * 80)
+}
+
+addtask verify_all_deltas after do_verify_delta_v1_v2 do_verify_delta_v2_v3 do_verify_delta_v1_v3 before do_deploy
 
 # No packages to create - this is a deploy-only recipe
 PACKAGES = ""
