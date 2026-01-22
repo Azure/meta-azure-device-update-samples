@@ -190,8 +190,10 @@ bitbake adu-delta-image
    - Signs with RSA-2048 key (using `openssl dgst`)
    - Creates `*-recompressed.swu` files (3 files each: sw-description, sw-description.sig, image)
 
-2. **Delta Generation Phase** (Tasks: `do_generate_delta_v1_v2/v2_v3/v1_v3`)
+2. **Delta Generation Phase** (Tasks: `do_generate_delta_v1_v2/v2_v3/v1_v3`) **← RUNS SERIALLY**
    - Uses C# DiffGenTool (PAMZ format, P/Invoke to libadudiffapi.so)
+   - **Task ordering prevents file conflicts:** v1→v2 first, then v1→v3, finally v2→v3
+   - This serialization prevents "Working directory was already used" errors when multiple tasks try to access the same source file (e.g., v1) simultaneously
    - Generates binary diffs between recompressed files
    - Creates `.diff` files
 
@@ -261,9 +263,27 @@ Located in `recipes-samples/delta-generation/`:
   
   - **Task dependencies:**
 ```bitbake
+# Delta generation tasks run SERIALLY to prevent file conflicts
+# when multiple tasks access the same source file (e.g., v1)
 do_generate_delta_v1_v2[depends] = "\
     adu-delta-image:do_recompress_and_sign_v1 \
     adu-delta-image:do_recompress_and_sign_v2 \
+    iot-hub-device-update-delta-diffgentool-native:do_populate_sysroot \
+"
+
+# v1→v3 runs AFTER v1→v2 completes (both access v1 source)
+do_generate_delta_v1_v3[depends] = "\
+    adu-delta-image:do_recompress_and_sign_v1 \
+    adu-delta-image:do_recompress_and_sign_v3 \
+    adu-delta-image:do_generate_delta_v1_v2 \
+    iot-hub-device-update-delta-diffgentool-native:do_populate_sysroot \
+"
+
+# v2→v3 runs LAST (after both v1-based deltas complete)
+do_generate_delta_v2_v3[depends] = "\
+    adu-delta-image:do_recompress_and_sign_v2 \
+    adu-delta-image:do_recompress_and_sign_v3 \
+    adu-delta-image:do_generate_delta_v1_v3 \
     iot-hub-device-update-delta-diffgentool-native:do_populate_sysroot \
 "
 
@@ -273,6 +293,8 @@ do_verify_delta_v1_v2[depends] = "\
 "
 ```
   
+  - **Task serialization:** Delta generation tasks run serially (not in parallel) to prevent file sharing violations when multiple tasks access the same source file simultaneously. For example, v1→v2 and v1→v3 both read the v1 source file, so v1→v3 waits for v1→v2 to complete before starting.
+  
   - **Output files:**
     - `adu-delta-v1-to-v2.diff`, `adu-delta-v2-to-v3.diff`, `adu-delta-v1-to-v3.diff`
     - `adu-update-image-v*.0.0-recompressed.swu` (3 files)
@@ -281,10 +303,22 @@ do_verify_delta_v1_v2[depends] = "\
 ### BBClass: adu-timestamp-check.bbclass
 Located in `classes/`:
 
-- Validates that delta files are newer than their source SWU files
-- Prevents accidental deployment of stale delta files
-- Only active when `WITH_FEATURE_DELTA_UPDATE='1'`
-- Automatically inherited by `adu-delta-image.bb`
+- **Purpose:** Validates that delta files are newer than their source SWU files to prevent deployment of stale artifacts
+- **Automatic cleanup:** When stale artifacts are detected (older than the base image), the class automatically removes them and issues warnings instead of failing the build. BitBake will then rebuild the artifacts with correct timestamps.
+- **Activation:** Only active when `WITH_FEATURE_DELTA_UPDATE='1'`
+- **Integration:** Automatically inherited by `adu-delta-image.bb`
+
+**Key behavior:**
+```python
+# Instead of failing build with bb.fatal(), automatically cleanup:
+if stale_artifacts:
+    bb.warn("Auto-cleaning %d stale artifact(s)" % len(stale_artifacts))
+    for artifact_file in stale_artifacts:
+        bb.warn("  - Removing: %s" % os.path.basename(artifact_file))
+        os.remove(artifact_file)
+```
+
+This eliminates manual intervention when rebuilding base images, as stale delta files are automatically cleaned up and regenerated.
 
 ---
 
@@ -615,7 +649,51 @@ LAYERDEPENDS_meta-azure-device-update-samples = " \
 
 ---
 
-### Delta Generation Issues
+#### Issue: "Working directory was already used by another instance"
+
+**Cause:** Multiple delta generation tasks running in parallel tried to access the same source file simultaneously (e.g., both v1→v2 and v1→v3 accessing the v1 source file).
+
+**Solution:** This issue is **already fixed** in the current version through task serialization. Delta generation tasks now run serially:
+- v1→v2 completes first
+- v1→v3 runs after v1→v2 (both need v1 source)
+- v2→v3 runs last (after both v1-based deltas complete)
+
+If you're using an older version of this layer, update to the latest version or manually add task dependencies:
+```bitbake
+do_generate_delta_v1_v3[depends] += "adu-delta-image:do_generate_delta_v1_v2"
+do_generate_delta_v2_v3[depends] += "adu-delta-image:do_generate_delta_v1_v3"
+```
+
+---
+
+#### Issue: "Timestamp validation failed - artifacts older than base image"
+
+**Cause:** Base image was rebuilt, but delta files from previous build still exist with older timestamps.
+
+**Solution:** This issue is **automatically handled** in the current version. The `adu-timestamp-check.bbclass` now:
+1. Detects stale artifacts (older than base image)
+2. Issues warnings about auto-cleanup
+3. Removes stale files automatically
+4. Allows BitBake to regenerate them with correct timestamps
+
+**Old behavior (manual intervention required):**
+```
+ERROR: Timestamp validation failed!
+# User had to manually: rm -f tmp/deploy/images/*/adu-delta*.diff
+```
+
+**New behavior (automatic):**
+```
+WARNING: Auto-cleaning 3 stale artifact(s)
+WARNING:   - Removing: adu-delta-v1-to-v2.diff
+WARNING:   - Removing: adu-delta-v2-to-v3.diff
+WARNING:   - Removing: adu-delta-v1-to-v3.diff
+# BitBake automatically regenerates them
+```
+
+No manual intervention needed!
+
+---
 
 #### Issue: Delta files are unexpectedly large (>50MB)
 
