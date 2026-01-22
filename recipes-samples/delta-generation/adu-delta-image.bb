@@ -359,22 +359,20 @@ sign_recompressed_swu() {
     
     bbnote "  Signature created: sw-description.sig ($(stat -c%s $temp_dir/sw-description.sig) bytes)"
     
-    # Get original file order from input SWU
-    # CRITICAL: Must maintain exact file order with sw-description first, then sw-description.sig
-    local file_list=$(cpio -it < "$input_swu" 2>/dev/null | grep -v "^$")
-    
     # Create new SWU with signature
     # The order MUST be: sw-description, sw-description.sig, <other files>
-    bbnote "  Creating signed SWU archive"
+    # Don't read file list from unsigned input - build it from actual files in temp_dir
+    bbnote "  Creating signed SWU archive with correct file order"
     (
         cd "$temp_dir"
-        # Always put sw-description first
+        # CRITICAL: List files in the EXACT order SWUpdate requires
+        # 1. sw-description MUST be first
         echo "sw-description"
-        # Then sw-description.sig
+        # 2. sw-description.sig MUST be second
         echo "sw-description.sig"
-        # Then all other files (excluding sw-description which we already added)
-        echo "$file_list" | grep -v "^sw-description$" | grep -v "^sw-description.sig$"
-    ) | (cd "$temp_dir" && cpio -o -H newc > "$output_swu" 2>/dev/null)
+        # 3. All other files (image files) - exclude sw-description and sig which we already listed
+        find . -maxdepth 1 -type f ! -name "sw-description*" -printf "%f\n" | sort
+    ) | (cd "$temp_dir" && cpio -o -H crc > "$output_swu" 2>/dev/null)
     
     local cpio_result=$?
     

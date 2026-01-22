@@ -894,6 +894,54 @@ LAYERSERIES_COMPAT_meta-azure-device-update-samples = "scarthgap"
 
 ---
 
+#### Issue: SWUpdate fails with "Broken pipe" or "Image invalid or corrupted"
+
+**Symptoms:**
+- Device logs show: `swupdate_image_write failed: Broken pipe`
+- Error message: `description file name not the first of the list`
+- SWUpdate rejects recompressed `.swu` files but accepts original files
+
+**Cause:** Recompressed SWU files missing `sw-description.sig` or incorrect file order.
+
+**SWUpdate requires EXACT file order:**
+1. `sw-description` (MUST be first)
+2. `sw-description.sig` (MUST be second)
+3. Image files (ext4.gz, etc.)
+
+**Diagnosis:**
+```bash
+# Check file order in recompressed SWU
+cpio -it < tmp/deploy/images/<MACHINE>/adu-update-image-v1.0.0-recompressed.swu | head -5
+
+# Expected output:
+# sw-description
+# sw-description.sig           ← Must be present!
+# adu-update-image-v1-<MACHINE>.ext4.gz
+
+# If sw-description.sig is missing or wrong order, rebuild
+```
+
+**Solution:**
+```bash
+# Rebuild delta-image recipe with clean state
+bitbake -c cleansstate adu-delta-image
+bitbake adu-delta-image
+
+# Verify all recompressed files have signatures
+for f in tmp/deploy/images/<MACHINE>/*-recompressed.swu; do
+    echo "=== $(basename $f) ==="
+    cpio -it < "$f" 2>/dev/null | head -3
+done
+```
+
+**Technical Details:**
+- The `do_recompress_and_sign_v1/v2/v3` tasks decompress gzip-compressed ext4 images and sign the resulting SWU
+- Signing adds `sw-description.sig` file with RSA-2048 signature
+- CPIO archive uses `-H crc` format with exact file ordering for SWUpdate compatibility
+- Missing signatures cause SWUpdate to reject files even if sw-description itself is valid
+
+---
+
 ## Testing and Validation
 
 ### Verify Delta Generation Pipeline
