@@ -42,6 +42,7 @@ DEPENDS = "adu-update-image-v1 adu-update-image-v2 adu-update-image-v3 iot-hub-d
 # Task-level dependencies for all delta generation tasks
 # Depend on do_swuimage to ensure SWU files are built and deployed
 # AND on diffgentool-native and processor-native to ensure native tools are available
+# Serialize delta generation to avoid file conflicts (v1 source accessed by multiple tasks)
 do_generate_delta_v1_v2[depends] = "\
     adu-update-image-v1:do_swuimage \
     adu-update-image-v2:do_swuimage \
@@ -49,19 +50,29 @@ do_generate_delta_v1_v2[depends] = "\
     iot-hub-device-update-delta-processor-native:do_populate_sysroot \
 "
 
-do_generate_delta_v2_v3[depends] = "\
-    adu-update-image-v2:do_swuimage \
-    adu-update-image-v3:do_swuimage \
-    iot-hub-device-update-delta-diffgentool-native:do_populate_sysroot \
-    iot-hub-device-update-delta-processor-native:do_populate_sysroot \
-"
-
+# Run v1→v3 after v1→v2 completes (both access v1 source file)
 do_generate_delta_v1_v3[depends] = "\
     adu-update-image-v1:do_swuimage \
     adu-update-image-v3:do_swuimage \
     iot-hub-device-update-delta-diffgentool-native:do_populate_sysroot \
     iot-hub-device-update-delta-processor-native:do_populate_sysroot \
+    adu-delta-image:do_generate_delta_v1_v2 \
 "
+
+# Run v2→v3 last (after both v1-based deltas complete)
+do_generate_delta_v2_v3[depends] = "\
+    adu-update-image-v2:do_swuimage \
+    adu-update-image-v3:do_swuimage \
+    iot-hub-device-update-delta-diffgentool-native:do_populate_sysroot \
+    iot-hub-device-update-delta-processor-native:do_populate_sysroot \
+    adu-delta-image:do_generate_delta_v1_v3 \
+"
+
+# Force re-evaluation of delta generation tasks (no stamp file)
+# This ensures BitBake checks dependencies even if task ran before
+do_generate_delta_v1_v2[nostamp] = "1"
+do_generate_delta_v2_v3[nostamp] = "1"
+do_generate_delta_v1_v3[nostamp] = "1"
 
 # No SRC_URI needed - using native diffgentool binary
 

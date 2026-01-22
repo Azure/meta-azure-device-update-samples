@@ -71,6 +71,11 @@ addtask create_versioned_image after do_unpack before do_swuimage
 do_create_versioned_image[depends] += "adu-base-image:do_image_complete"
 do_create_versioned_image[vardeps] += "ADU_SOFTWARE_VERSION"
 
+# Explicit dependency: SWU generation depends on base image
+# This ensures BitBake rebuilds .swu files when base image changes
+do_swuimage[depends] += "adu-base-image:do_image_complete"
+do_swuimage[deptask] += "do_packagedata"
+
 
 # Source files - sw-description template
 SRC_URI = "file://sw-description"

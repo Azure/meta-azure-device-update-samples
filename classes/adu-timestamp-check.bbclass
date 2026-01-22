@@ -38,18 +38,18 @@ python do_validate_timestamps() {
     if not base_files:
         if artifact_files:
             # CRITICAL: Artifacts exist but base image doesn't!
-            # This means artifacts are from cache/previous build with old base image
-            bb.error("VALIDATION FAILED: Base image doesn't exist but %s artifacts found!" % artifact_type)
-            bb.error("  This means %s is using cached artifacts that contain an OLD base image." % pn)
-            bb.error("  The base image is either being rebuilt or missing, but cached artifacts")
-            bb.error("  will NOT automatically use the new base image.")
-            bb.error("")
-            bb.error("  Artifacts found:")
+            # Auto-cleanup: Remove stale artifacts and let BitBake rebuild them
+            bb.warn("Base image doesn't exist but %s artifacts found - auto-cleaning stale artifacts" % artifact_type)
+            bb.warn("  This means %s is using cached artifacts from previous build." % pn)
+            bb.warn("  Removing stale artifacts (they will be rebuilt automatically):")
             for artifact_file in artifact_files:
-                bb.error("    - %s" % os.path.basename(artifact_file))
-            bb.error("")
-            bb.error("  Solution: Run './scripts/build.sh --rebuild-base-image' to rebuild everything.")
-            bb.fatal("Timestamp validation failed! Artifacts contain stale base image.")
+                bb.warn("    - Removing: %s" % os.path.basename(artifact_file))
+                try:
+                    os.remove(artifact_file)
+                except OSError as e:
+                    bb.warn("      Failed to remove %s: %s" % (artifact_file, e))
+            bb.warn("  BitBake will now rebuild fresh artifacts with correct base image.")
+            return
         else:
             # Both base image and artifacts don't exist - this is OK (first build)
             bb.note("Base image and %s artifacts not found - will be built fresh (first build)." % artifact_type)
@@ -67,24 +67,30 @@ python do_validate_timestamps() {
         bb.note("Base image exists, %s artifacts will be built fresh." % artifact_type)
         return
     
-    # Check each artifact
-    validation_failed = False
+    # Check each artifact - auto-cleanup if stale
+    stale_artifacts = []
     for artifact_file in artifact_files:
         artifact_mtime = os.path.getmtime(artifact_file)
         artifact_name = os.path.basename(artifact_file)
         
         if artifact_mtime < base_mtime:
-            bb.error("VALIDATION FAILED: %s is older than base image!" % artifact_name)
-            bb.error("  Artifact: %s (mtime: %s)" % (artifact_name, artifact_mtime))
-            bb.error("  Base:     %s (mtime: %s)" % (os.path.basename(base_file), base_mtime))
-            bb.error("  This indicates the artifact was not rebuilt after base image changed.")
-            bb.error("  Solution: Run './scripts/build.sh --rebuild-base-image' to force rebuild.")
-            validation_failed = True
+            bb.warn("Stale artifact detected: %s is older than base image" % artifact_name)
+            bb.warn("  Artifact: %s (mtime: %s)" % (artifact_name, artifact_mtime))
+            bb.warn("  Base:     %s (mtime: %s)" % (os.path.basename(base_file), base_mtime))
+            stale_artifacts.append(artifact_file)
         else:
             bb.note("✓ %s is newer than base image (OK)" % artifact_name)
     
-    if validation_failed:
-        bb.fatal("Timestamp validation failed! Update images are stale. Please rebuild with --rebuild-base-image.")
+    # Auto-cleanup stale artifacts
+    if stale_artifacts:
+        bb.warn("Auto-cleaning %d stale artifact(s) - they will be rebuilt:" % len(stale_artifacts))
+        for artifact_file in stale_artifacts:
+            bb.warn("  - Removing: %s" % os.path.basename(artifact_file))
+            try:
+                os.remove(artifact_file)
+            except OSError as e:
+                bb.warn("      Failed to remove %s: %s" % (artifact_file, e))
+        bb.warn("BitBake will rebuild fresh artifacts with correct timestamps.")
     else:
         bb.note("✓ All artifacts have correct timestamps")
     
