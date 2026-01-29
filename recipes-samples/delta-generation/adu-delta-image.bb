@@ -605,103 +605,9 @@ do_generate_delta_v1_v3() {
 
 addtask generate_delta_v1_v3 after do_unpack before do_test_delta_v1_v3
 
-# Helper function to generate ADU import manifest (JSON v5)
-generate_import_manifest() {
-    source_swu="$1"
-    recompressed_swu="$2"
-    delta_file="$3"
-    source_ver="$4"
-    target_ver="$5"
-    manifest_file="$6"
-    
-    source_hash=$(sha256sum "$source_swu" | awk '{print $1}')
-    target_hash=$(sha256sum "$recompressed_swu" | awk '{print $1}')
-    delta_hash=$(sha256sum "$delta_file" | awk '{print $1}')
-    recompressed_size=$(stat -c%s "$recompressed_swu")
-    delta_size=$(stat -c%s "$delta_file")
-    
-    # Extract installedCriteria from adu-version file inside the target SWU
-    # This ensures the manifest uses the actual version from the update package
-    bbnote "Extracting installedCriteria from target SWU..."
-    temp_extract="${WORKDIR}/temp_extract_manifest"
-    rm -rf "$temp_extract"
-    mkdir -p "$temp_extract"
-    
-    # Extract SWU to get adu-version file
-    if cpio -i -F "$recompressed_swu" -D "$temp_extract" 2>/dev/null; then
-        # Look for sw-description which contains adu-version reference
-        if [ -f "$temp_extract/sw-description" ]; then
-            # Extract version from first image's properties or fallback to target_ver
-            installed_criteria=$(grep -oP 'version\s*=\s*"\K[^"]+' "$temp_extract/sw-description" | head -1)
-            if [ -z "$installed_criteria" ]; then
-                installed_criteria="$target_ver"
-                bbwarn "Could not extract version from sw-description, using target version: $installed_criteria"
-            else
-                bbnote "Extracted installedCriteria from sw-description: $installed_criteria"
-            fi
-        else
-            installed_criteria="$target_ver"
-            bbwarn "sw-description not found, using target version: $installed_criteria"
-        fi
-    else
-        installed_criteria="$target_ver"
-        bbwarn "Could not extract SWU, using target version: $installed_criteria"
-    fi
-    rm -rf "$temp_extract"
-    
-    # Script file name for A/B updates
-    SCRIPT_FILE="yocto-a-b-update.sh"
-    SWU_FILE_NAME="adu-update-image-v${target_ver}-recompressed.swu"
-    SCRIPT_ARGUMENTS="--software-version-file /etc/adu-version --swupdate-log-file /var/log/adu/swupdate.log"
-    
-    # Generate JSON import manifest
-    printf '{\n' > "$manifest_file"
-    printf '  "updateId": {\n' >> "$manifest_file"
-    printf '    "provider": "microsoft",\n' >> "$manifest_file"
-    printf '    "name": "adu-delta-update",\n' >> "$manifest_file"
-    printf '    "version": "%s"\n' "$target_ver" >> "$manifest_file"
-    printf '  },\n' >> "$manifest_file"
-    printf '  "updateType": "microsoft/swupdate:2",\n' >> "$manifest_file"
-    printf '  "compatibility": [\n' >> "$manifest_file"
-    printf '    {\n' >> "$manifest_file"
-    printf '      "manufacturer": "raspberrypi",\n' >> "$manifest_file"
-    printf '      "model": "raspberrypi4-64"\n' >> "$manifest_file"
-    printf '    }\n' >> "$manifest_file"
-    printf '  ],\n' >> "$manifest_file"
-    printf '  "instructions": {\n' >> "$manifest_file"
-    printf '    "steps": [\n' >> "$manifest_file"
-    printf '      {\n' >> "$manifest_file"
-    printf '        "handler": "microsoft/swupdate:2",\n' >> "$manifest_file"
-    printf '        "files": ["%s", "%s"],\n' "$SWU_FILE_NAME" "$SCRIPT_FILE" >> "$manifest_file"
-    printf '        "handlerProperties": {\n' >> "$manifest_file"
-    printf '          "installedCriteria": "%s",\n' "$installed_criteria" >> "$manifest_file"
-    printf '          "swuFileName": "%s",\n' "$SWU_FILE_NAME" >> "$manifest_file"
-    printf '          "scriptFileName": "%s",\n' "$SCRIPT_FILE" >> "$manifest_file"
-    printf '          "arguments": "%s"\n' "$SCRIPT_ARGUMENTS" >> "$manifest_file"
-    printf '        }\n' >> "$manifest_file"
-    printf '      }\n' >> "$manifest_file"
-    printf '    ]\n' >> "$manifest_file"
-    printf '  },\n' >> "$manifest_file"
-    printf '  "relatedFiles": [\n' >> "$manifest_file"
-    printf '    {\n' >> "$manifest_file"
-    printf '      "filename": "adu-delta-v%s-to-v%s.diff",\n' "$source_ver" "$target_ver" >> "$manifest_file"
-    printf '      "sizeInBytes": %s,\n' "$delta_size" >> "$manifest_file"
-    printf '      "hashes": {\n' >> "$manifest_file"
-    printf '        "sha256": "%s"\n' "$delta_hash" >> "$manifest_file"
-    printf '      },\n' >> "$manifest_file"
-    printf '      "properties": {\n' >> "$manifest_file"
-    printf '        "microsoft.sourceFileHashAlgorithm": "sha256",\n' >> "$manifest_file"
-    printf '        "microsoft.sourceFileHash": "%s"\n' "$source_hash" >> "$manifest_file"
-    printf '      }\n' >> "$manifest_file"
-    printf '    }\n' >> "$manifest_file"
-    printf '  ],\n' >> "$manifest_file"
-    printf '  "downloadHandler": {\n' >> "$manifest_file"
-    printf '    "id": "microsoft/delta:1"\n' >> "$manifest_file"
-    printf '  }\n' >> "$manifest_file"
-    printf '}\n' >> "$manifest_file"
-    
-    bbnote "Import manifest generated: $(basename $manifest_file)"
-}
+# Import manifest generation moved to adu-delta-test-package recipe
+# The generate_import_manifest() function has been removed to avoid confusion
+# All manifests are now generated by the test package Python script
 
 # Test task for v1 -> v2
 do_test_delta_v1_v2() {
@@ -798,10 +704,8 @@ do_test_delta_v1_v2() {
     rm -f "$RECONSTRUCTED"
     bbnote "====================================="
     
-    # Generate import manifest for this delta
-    generate_import_manifest "$SWU_V1" "$SWU_V2" \
-        "${DELTA_OUTPUT_DIR}/${DELTA_FILE_NAME_V1_V2}" "1.0.0" "2.0.0" \
-        "${DELTA_OUTPUT_DIR}/delta-manifest-v1.0.0-to-v2.0.0.importmanifest.json"
+    # Import manifest generation moved to adu-delta-test-package recipe
+    # (avoids duplication and keeps test package as single source of truth)
 }
 
 addtask test_delta_v1_v2 after do_generate_delta_v1_v2 before do_deploy
@@ -901,10 +805,8 @@ do_test_delta_v2_v3() {
     rm -f "$RECONSTRUCTED"
     bbnote "====================================="
     
-    # Generate import manifest for this delta
-    generate_import_manifest "$SWU_V2" "$SWU_V3" \
-        "${DELTA_OUTPUT_DIR}/${DELTA_FILE_NAME_V2_V3}" "2.0.0" "3.0.0" \
-        "${DELTA_OUTPUT_DIR}/delta-manifest-v2.0.0-to-v3.0.0.importmanifest.json"
+    # Import manifest generation moved to adu-delta-test-package recipe
+    # (avoids duplication and keeps test package as single source of truth)
 }
 
 addtask test_delta_v2_v3 after do_generate_delta_v2_v3 before do_deploy
@@ -1004,10 +906,8 @@ do_test_delta_v1_v3() {
     rm -f "$RECONSTRUCTED"
     bbnote "====================================="
     
-    # Generate import manifest for this delta (skip v2 path)
-    generate_import_manifest "$SWU_V1" "$SWU_V3" \
-        "${DELTA_OUTPUT_DIR}/${DELTA_FILE_NAME_V1_V3}" "1.0.0" "3.0.0" \
-        "${DELTA_OUTPUT_DIR}/delta-manifest-v1.0.0-to-v3.0.0.importmanifest.json"
+    # Import manifest generation moved to adu-delta-test-package recipe
+    # (avoids duplication and keeps test package as single source of truth)
 }
 
 addtask test_delta_v1_v3 after do_generate_delta_v1_v3 before do_deploy

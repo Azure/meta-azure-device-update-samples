@@ -1232,6 +1232,178 @@ See [LICENSE](LICENSE) file for full text.
 
 ---
 
+## Delta Test Package
+
+The **adu-delta-test-package** recipe creates a comprehensive test package containing all artifacts needed for on-device delta update testing and verification.
+
+### Building the Test Package
+
+```bash
+# Build all update images and delta files first
+bitbake adu-update-image-v1 adu-update-image-v2 adu-update-image-v3
+bitbake adu-delta-image
+
+# Build the test package
+bitbake adu-delta-test-package
+```
+
+### Package Contents
+
+The test package is deployed to `tmp/deploy/images/<MACHINE>/adu-delta-test-package.tar.gz` and contains:
+
+```
+delta-test-package-YYYYMMDD-HHMMSS/
+├── images/                    # Base image and original update files
+│   ├── adu-base-image.wic.gz
+│   ├── adu-update-image-v1.swu
+│   ├── adu-update-image-v2.swu
+│   └── adu-update-image-v3.swu
+├── update-1.0.0/              # Update v1 deployment package
+│   ├── contoso.adu-yocto-rpi4-poc-1.1.0.0.importmanifest.json
+│   ├── adu-update-image-v1.0.0-recompressed.swu
+│   └── yocto-a-b-update.sh
+├── update-2.0.0/              # Update v2 deployment package (delta)
+│   ├── contoso.adu-yocto-rpi4-poc-1.2.0.0.importmanifest.json
+│   ├── adu-delta-v1-to-v2.diff
+│   ├── adu-update-image-v2.0.0-recompressed.swu
+│   └── yocto-a-b-update.sh
+├── update-3.0.0/              # Update v3 deployment package (multiple delta paths)
+│   ├── contoso.adu-yocto-rpi4-poc-1.3.0.0.importmanifest.json
+│   ├── adu-delta-v1-to-v3.diff
+│   ├── adu-delta-v2-to-v3.diff
+│   ├── adu-update-image-v3.0.0-recompressed.swu
+│   └── yocto-a-b-update.sh
+├── scripts/                   # On-device testing scripts
+│   ├── cache_manager.sh       # SDC cache operations
+│   └── delta_operations.py    # Delta verification utilities
+└── docs/                      # Documentation
+    ├── BUILD-TOOLS.md         # Native build tool reference
+    └── TESTING_GUIDE.md       # On-device testing procedures
+```
+
+**On-Device Testing Tools (scripts/)**
+- `cache_manager.sh` - Standalone Delta Cache (SDC) management for `/var/lib/adu/sdc/`
+- `delta_operations.py` - Python utilities for delta verification and testing
+
+**Build-Time Tools (NOT included)**
+
+Native x86_64 tools used during `bitbake adu-delta-image` (see `docs/BUILD-TOOLS.md` for details):
+- `diffgentool` - C# delta generator (PAMZ format)
+- `applydiff` - C++ delta reconstructor/verifier  
+- `recompress` - SWUpdate recompression tool
+- `libadudiffapi.so` - Core delta library
+
+> **Note:** The test package focuses on **on-device verification** with pre-generated deltas. Build-time tools run during the Yocto build on the host machine (x86_64) and are documented in `docs/BUILD-TOOLS.md` for reference.
+
+**Documentation (docs/)**
+- `BUILD-TOOLS.md` - Comprehensive reference for native build tools (diffgentool, applydiff, recompress, etc.)
+- `TESTING_GUIDE.md` - On-device testing procedures and expected results
+
+### On-Device Testing
+
+Transfer the package to your device and extract:
+
+```bash
+# Transfer to device
+scp tmp/deploy/images/raspberrypi4-64/adu-delta-test-package-*.tar.gz pi@<device-ip>:~
+
+# On the device
+tar -xzf adu-delta-test-package-*.tar.gz
+cd delta-test-package-*/
+```
+
+### Cache Management Operations
+
+**Store source images in cache:**
+
+```bash
+# Store v1 as source for delta updates
+./scripts/cache_manager.sh store \
+    images/adu-update-image-v1.0.0-recompressed.swu \
+    "Contoso" \
+    "1.0.0"
+
+# List cached files
+./scripts/cache_manager.sh list
+
+# Show cache information
+./scripts/cache_manager.sh info
+```
+
+**Verify cache operations:**
+
+```bash
+# Lookup specific version
+./scripts/cache_manager.sh lookup "Contoso" "1.0.0"
+
+# Verify file matches cache
+./scripts/cache_manager.sh verify \
+    images/adu-update-image-v1.0.0-recompressed.swu \
+    "Contoso" \
+    "1.0.0"
+```
+
+### Expected Cache Structure
+
+After storing files, the cache at `/var/lib/adu/sdc/` should contain:
+
+```
+/var/lib/adu/sdc/
+└── Contoso/
+    ├── sha256-<hash-v1>              # v1 recompressed SWU
+    ├── sha256-<hash-v1>.meta         # Metadata (version: 1.0.0)
+    ├── sha256-<hash-v2>              # v2 recompressed SWU
+    └── sha256-<hash-v2>.meta         # Metadata (version: 2.0.0)
+```
+
+**Ownership:** `adu:adu`  
+**Permissions:** `644` for files, `755` for directories
+
+### Integration with ADU Agent
+
+The ADU agent uses these cache locations:
+
+- **Config:** `/etc/adu/du-config.json`
+- **Downloads:** `/var/lib/adu/downloads/<workflow-id>/`
+- **Source Cache:** `/var/lib/adu/sdc/`
+- **Extensions:** `/var/lib/adu/extensions/download_handlers/`
+- **Logs:** `journalctl -u adu-agent -f`
+
+**Delta update workflow:**
+1. **On successful update:** Agent stores new version in cache
+2. **On delta update:** Agent looks up source from cache, downloads delta, reconstructs target
+3. **Cache expiration:** Old versions can be cleaned up based on policy
+
+### Performance Metrics (Raspberry Pi 4)
+
+- **Cache Store:** < 30 seconds (includes SHA256 calculation)
+- **Cache Lookup:** < 1 second  
+- **Delta Reconstruction:** ~30-60 seconds
+
+### Troubleshooting
+
+**Permission errors:**
+```bash
+sudo chown -R adu:adu /var/lib/adu/sdc/
+sudo chmod -R 755 /var/lib/adu/sdc/
+```
+
+**Cache not found:**
+```bash
+sudo mkdir -p /var/lib/adu/sdc/
+sudo chown adu:adu /var/lib/adu/sdc/
+```
+
+**Monitor ADU agent:**
+```bash
+journalctl -u adu-agent -f
+systemctl status adu-agent
+```
+
+For complete testing procedures, see the `TESTING_GUIDE.md` included in the test package.
+
+---
+
 ## Support and Contact
 
 ### For Issues Related To:

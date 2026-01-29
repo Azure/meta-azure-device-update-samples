@@ -115,7 +115,7 @@ def generate_import_manifest(version, swu_file, swu_hash, swu_size, script_file,
     # Add deltaHandler if delta caching is enabled (for v1.0.1 base update)
     # This tells the agent to save the .swu file to source delta cache for future delta operations
     if enable_delta_caching:
-        manifest["files"][0]["deltaHandler"] = OrderedDict([
+        manifest["files"][0]["downloadHandler"] = OrderedDict([
             ("id", "microsoft/delta:1")
         ])
     
