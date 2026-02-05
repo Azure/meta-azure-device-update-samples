@@ -47,7 +47,14 @@ do_create_versioned_image() {
     # Use debugfs to write the file into ext4 filesystem
     # debugfs can modify ext4 filesystems without mounting
     bbnote "Updating /etc/adu-version to ${ADU_SOFTWARE_VERSION} using debugfs..."
+    
+    # Ensure /etc directory exists in the filesystem
+    debugfs -w -R "mkdir /etc" $WORK/rootfs.ext4 2>/dev/null || true
+    
+    # Remove existing adu-version if present
     debugfs -w -R "rm /etc/adu-version" $WORK/rootfs.ext4 2>/dev/null || true
+    
+    # Write new version file
     debugfs -w -R "write $WORK/adu-version.new /etc/adu-version" $WORK/rootfs.ext4 || bbfatal "Failed to write /etc/adu-version"
     
     # Verify the change
