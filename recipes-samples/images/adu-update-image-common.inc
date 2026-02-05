@@ -22,54 +22,115 @@ DEPENDS += "adu-base-image swupdate e2fsprogs-native"
 # This unpacks adu-base-image.ext4.gz, modifies /etc/adu-version using debugfs, and repacks
 do_create_versioned_image() {
     # Find the adu-base-image ext4.gz file
+    bbnote "======================================================================"
+    bbnote "SEARCHING FOR BASE IMAGE in ${DEPLOY_DIR_IMAGE}"
+    bbnote "Looking for pattern: adu-base-image-*.ext4.gz"
+
     BASE_IMAGE=$(find ${DEPLOY_DIR_IMAGE} -name 'adu-base-image-*.ext4.gz' -type f | head -n1)
-    
+
     if [ -z "$BASE_IMAGE" ]; then
-        bbfatal "Could not find adu-base-image-*.ext4.gz in ${DEPLOY_DIR_IMAGE}"
+        bberror "Could not find adu-base-image-*.ext4.gz in ${DEPLOY_DIR_IMAGE}"
+        bberror "Available files in ${DEPLOY_DIR_IMAGE}:"
+        ls -lh ${DEPLOY_DIR_IMAGE}/ || true
+        bbfatal "Base image not found!"
     fi
-    
-    bbnote "Creating versioned image for ${PN}"
-    bbnote "  Base image: $BASE_IMAGE"
+
+    bbnote "✓ Found base image: $BASE_IMAGE"
+    bbnote "  File size: $(du -h "$BASE_IMAGE" | cut -f1)"
+    bbnote "  Creating versioned image for ${PN}"
     bbnote "  Target version: ${ADU_SOFTWARE_VERSION}"
-    
+    bbnote "======================================================================"
+
     # Create working directory
     WORK=${WORKDIR}/versioned-image
     rm -rf $WORK
     mkdir -p $WORK
-    
+
     # Decompress the base image
     bbnote "Decompressing base image..."
-    gunzip -c "$BASE_IMAGE" > $WORK/rootfs.ext4
-    
+    bbnote "  Source: $BASE_IMAGE"
+    bbnote "  Destination: $WORK/rootfs.ext4"
+
+    if gunzip -c "$BASE_IMAGE" > $WORK/rootfs.ext4; then
+        bbnote "✓ Decompression successful"
+        bbnote "  Decompressed size: $(du -h $WORK/rootfs.ext4 | cut -f1)"
+    else
+        bbfatal "Failed to decompress base image!"
+    fi
+
+    # Verify debugfs tool exists
+    bbnote "Checking for debugfs tool..."
+    if which debugfs >/dev/null 2>&1; then
+        DEBUGFS_PATH=$(which debugfs)
+        bbnote "✓ debugfs found at: $DEBUGFS_PATH"
+    else
+        bbfatal "debugfs tool not found! Install e2fsprogs-native"
+    fi
+
+    # List root directory contents of ext4 filesystem
+    bbnote "======================================================================"
+    bbnote "LISTING ROOT DIRECTORY CONTENTS OF BASE IMAGE:"
+    debugfs -R "ls -l /" $WORK/rootfs.ext4 2>&1 | while read line; do
+        bbnote "  $line"
+    done
+    bbnote "======================================================================"
+
     # Create new adu-version file
     echo "${ADU_SOFTWARE_VERSION}" > $WORK/adu-version.new
-    
+    bbnote "Created new adu-version file:"
+    bbnote "  Path: $WORK/adu-version.new"
+    bbnote "  Content: $(cat $WORK/adu-version.new)"
+    bbnote "  Size: $(wc -c < $WORK/adu-version.new) bytes"
+
     # Use debugfs to write the file into ext4 filesystem
     # debugfs can modify ext4 filesystems without mounting
-    bbnote "Updating /etc/adu-version to ${ADU_SOFTWARE_VERSION} using debugfs..."
-    
-    # Ensure /etc directory exists in the filesystem
-    debugfs -w -R "mkdir /etc" $WORK/rootfs.ext4 2>/dev/null || true
-    
+    bbnote "======================================================================"
+    bbnote "UPDATING /etc/adu-version using debugfs..."
+
+    # Check if /etc directory exists in the filesystem
+    bbnote "Checking if /etc directory exists..."
+    if debugfs -R "cd /etc" $WORK/rootfs.ext4 2>&1 | grep -q "Inode not found"; then
+        bbnote "  /etc does NOT exist - will create it"
+        bbnote "Executing: debugfs -w -R 'mkdir etc' $WORK/rootfs.ext4"
+
+        if debugfs -w -R "mkdir etc" $WORK/rootfs.ext4 2>&1; then
+            bbnote "✓ Created /etc directory"
+
+            # Verify it was created
+            bbnote "Verifying /etc creation..."
+            debugfs -R "ls -l /" $WORK/rootfs.ext4 2>&1 | grep etc || bbwarn "Could not verify /etc in root listing"
+        else
+            bbwarn "Failed to create /etc directory - will try to write anyway"
+        fi
+    else
+        bbnote "✓ /etc directory already exists"
+
+        # Show /etc contents
+        bbnote "Current /etc directory contents:"
+        debugfs -R "ls -l /etc" $WORK/rootfs.ext4 2>&1 | head -20 | while read line; do
+            bbnote "  $line"
+        done
+    fi
+
     # Remove existing adu-version if present
     debugfs -w -R "rm /etc/adu-version" $WORK/rootfs.ext4 2>/dev/null || true
-    
+
     # Write new version file
     debugfs -w -R "write $WORK/adu-version.new /etc/adu-version" $WORK/rootfs.ext4 || bbfatal "Failed to write /etc/adu-version"
-    
+
     # Verify the change
     bbnote "Verifying /etc/adu-version content..."
     debugfs -R "cat /etc/adu-version" $WORK/rootfs.ext4 | head -1 | grep -q "${ADU_SOFTWARE_VERSION}" || bbwarn "Version verification failed"
-    
+
     # Compress to deploy directory with correct name
     OUTPUT_FILE="${DEPLOY_DIR_IMAGE}/${PN}-${MACHINE}.ext4.gz"
     bbnote "Compressing to $OUTPUT_FILE..."
     gzip -c $WORK/rootfs.ext4 > $OUTPUT_FILE
-    
+
     # Create symlink for swupdate class (IMAGE_LINK_NAME)
     cd ${DEPLOY_DIR_IMAGE}
     ln -sf $(basename $OUTPUT_FILE) ${IMAGE_LINK_NAME}.ext4.gz
-    
+
     bbnote "Created versioned image: $OUTPUT_FILE"
     bbnote "  Symlink: ${IMAGE_LINK_NAME}.ext4.gz"
 }
@@ -123,14 +184,14 @@ inherit ${@bb.utils.contains('WITH_FEATURE_DELTA_UPDATE', '1', 'adu-timestamp-ch
 python do_clean_old_deploys() {
     import glob
     import os
-    
+
     deploy_dir = d.getVar('DEPLOY_DIR_IMAGE')
     pn = d.getVar('PN')
-    
+
     # Remove old SWU files and manifests for this recipe
     old_swu_pattern = os.path.join(deploy_dir, pn + '*.swu')
     old_manifest_pattern = os.path.join(deploy_dir, 'manifest-*-' + pn + '.swuimage')
-    
+
     for pattern in [old_swu_pattern, old_manifest_pattern]:
         for old_file in glob.glob(pattern):
             bb.note("Removing old deployed file: %s" % old_file)
@@ -157,7 +218,7 @@ python do_set_version() {
     version = d.getVar('ADU_SOFTWARE_VERSION')
     image_name = d.getVar('IMAGE_LINK_NAME')
     image_basename = d.getVar('IMAGE_BASENAME') or 'N/A'
-    
+
     bb.note("======================================================================")
     bb.note("TASK: do_set_version")
     bb.note("RECIPE: %s" % pn)
@@ -178,18 +239,18 @@ addtask set_version before do_swuimage after do_unpack
 python do_deploy_adu_version() {
     import os
     import subprocess
-    
+
     deploy_dir = d.getVar('DEPLOY_DIR_IMAGE')
     image_name = d.getVar('IMAGE_LINK_NAME')
     version = d.getVar('ADU_SOFTWARE_VERSION')
-    
+
     if not image_name or not version:
         bb.warn("IMAGE_LINK_NAME or ADU_SOFTWARE_VERSION not set, skipping adu-version deployment")
         return
-    
+
     # Construct output filename
     version_file = os.path.join(deploy_dir, f"{image_name}.adu-version")
-    
+
     bb.note("======================================================================")
     bb.note("TASK: do_deploy_adu_version")
     bb.note("======================================================================")
@@ -197,7 +258,7 @@ python do_deploy_adu_version() {
     bb.note(f"  File: {version_file}")
     bb.note(f"  Version: {version}")
     bb.note("======================================================================")
-    
+
     # Write version to file
     try:
         with open(version_file, 'w') as f:
