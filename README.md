@@ -470,6 +470,10 @@ ADUC_PRIVATE_KEY_PASSWORD ??= "${TOPDIR}/conf/swupdate-signing/priv.pass"
 
 # Enable delta update feature by default
 WITH_FEATURE_DELTA_UPDATE ??= "1"
+
+# Enable v1→v3 skip-delta generation (requires ≥8GB RAM on build host)
+# Set to "0" on machines with <8GB RAM to avoid OOM during diffgentool
+ADU_GENERATE_V1_V3_DELTA ??= "1"
 ```
 
 **To customize:** Add to your `conf/local.conf`:
@@ -709,6 +713,35 @@ If you're using an older version of this layer, update to the latest version or 
 do_generate_delta_v1_v3[depends] += "adu-delta-image:do_generate_delta_v1_v2"
 do_generate_delta_v2_v3[depends] += "adu-delta-image:do_generate_delta_v1_v3"
 ```
+
+---
+
+#### Issue: diffgentool killed during v1→v3 delta generation (OOM)
+
+**Symptom:**
+```
+ERROR: diffgentool failed
+Killed
+```
+Build fails at `do_generate_delta_v1_v3`. Sequential deltas (v1→v2, v2→v3) succeed.
+
+**Cause:** The diffgentool processes two ~218MB SWU files. On machines with <8GB RAM,
+the OOM killer terminates the process during v1→v3 (skip-delta) generation.
+
+**Solution:** Disable v1→v3 skip-delta generation:
+```bitbake
+# In local.conf:
+ADU_GENERATE_V1_V3_DELTA = "0"
+```
+
+Or when using kas, this is set in `kas-delta.yml` by default. To re-enable on hosts with ≥8GB RAM:
+```bitbake
+ADU_GENERATE_V1_V3_DELTA = "1"
+```
+
+Sequential deltas (v1→v2, v2→v3) are always generated — they cover the standard update path.
+
+> See [docs/TROUBLESHOOTING.md](../../../docs/TROUBLESHOOTING.md#tsg-007-diffgentool-killed-during-v1v3-delta-generation-oom) for memory requirements and alternative fixes.
 
 ---
 

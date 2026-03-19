@@ -6,6 +6,11 @@
 DESCRIPTION = "ADU Delta Update File Generator (v1->v2, v2->v3, v1->v3)"
 LICENSE = "CLOSED"
 
+# Set to "0" to skip v1→v3 (skip-delta) generation.
+# Useful on machines with limited RAM (<8GB) where diffgentool may be OOM-killed.
+# Sequential deltas (v1→v2, v2→v3) will still be generated.
+ADU_GENERATE_V1_V3_DELTA ?= "1"
+
 # No SRC_URI needed - signing is done directly with openssl in bash function
 
 # Inherit timestamp validation to ensure deltas are rebuilt when base image changes
@@ -40,33 +45,9 @@ addtask clean_old_deploys before do_deploy after do_generate_all_deltas
 DEPENDS = "adu-update-image-v1 adu-update-image-v2 adu-update-image-v3 iot-hub-device-update-delta-diffgentool-native iot-hub-device-update-delta-processor-native"
 
 # Task-level dependencies for all delta generation tasks
-# Depend on do_swuimage to ensure SWU files are built and deployed
-# AND on diffgentool-native and processor-native to ensure native tools are available
-# Serialize delta generation to avoid file conflicts (v1 source accessed by multiple tasks)
-do_generate_delta_v1_v2[depends] = "\
-    adu-update-image-v1:do_swuimage \
-    adu-update-image-v2:do_swuimage \
-    iot-hub-device-update-delta-diffgentool-native:do_populate_sysroot \
-    iot-hub-device-update-delta-processor-native:do_populate_sysroot \
-"
-
-# Run v1→v3 after v1→v2 completes (both access v1 source file)
-do_generate_delta_v1_v3[depends] = "\
-    adu-update-image-v1:do_swuimage \
-    adu-update-image-v3:do_swuimage \
-    iot-hub-device-update-delta-diffgentool-native:do_populate_sysroot \
-    iot-hub-device-update-delta-processor-native:do_populate_sysroot \
-    adu-delta-image:do_generate_delta_v1_v2 \
-"
-
-# Run v2→v3 last (after both v1-based deltas complete)
-do_generate_delta_v2_v3[depends] = "\
-    adu-update-image-v2:do_swuimage \
-    adu-update-image-v3:do_swuimage \
-    iot-hub-device-update-delta-diffgentool-native:do_populate_sysroot \
-    iot-hub-device-update-delta-processor-native:do_populate_sysroot \
-    adu-delta-image:do_generate_delta_v1_v3 \
-"
+# Note: These are overridden by the more specific dependencies below (lines ~290-310)
+# that use recompress_and_sign tasks instead of do_swuimage directly.
+# Kept for documentation of the intended task ordering.
 
 # Force re-evaluation of delta generation tasks (no stamp file)
 # This ensures BitBake checks dependencies even if task ran before
@@ -571,6 +552,11 @@ addtask generate_delta_v2_v3 after do_unpack before do_test_delta_v2_v3
 
 # Task 3: Generate v1 -> v3 delta (skip v2 path)
 do_generate_delta_v1_v3() {
+    if [ "${ADU_GENERATE_V1_V3_DELTA}" != "1" ]; then
+        bbnote "Skipping v1→v3 delta generation (ADU_GENERATE_V1_V3_DELTA != 1)"
+        return 0
+    fi
+
     # Add native tools to PATH
     export PATH="${STAGING_BINDIR_NATIVE}:${PATH}"
     export LD_LIBRARY_PATH="${STAGING_LIBDIR_NATIVE}:${LD_LIBRARY_PATH}"
@@ -813,6 +799,11 @@ addtask test_delta_v2_v3 after do_generate_delta_v2_v3 before do_deploy
 
 # Test task for v1 -> v3
 do_test_delta_v1_v3() {
+    if [ "${ADU_GENERATE_V1_V3_DELTA}" != "1" ]; then
+        bbnote "Skipping v1→v3 delta test (ADU_GENERATE_V1_V3_DELTA != 1)"
+        return 0
+    fi
+
     # Add /usr/bin to PATH so bspatch is available
     export PATH="/usr/bin:${PATH}"
     
@@ -1158,6 +1149,10 @@ python do_verify_delta_v2_v3() {
 }
 
 python do_verify_delta_v1_v3() {
+    if d.getVar('ADU_GENERATE_V1_V3_DELTA') != '1':
+        bb.note("Skipping v1→v3 delta verification (ADU_GENERATE_V1_V3_DELTA != 1)")
+        return
+
     import subprocess
     import os
     
