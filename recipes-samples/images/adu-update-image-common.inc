@@ -204,7 +204,8 @@ python do_clean_old_deploys() {
 addtask clean_old_deploys before do_deploy after do_swuimage
 
 # Inherit timestamp validation to ensure this image is rebuilt when base image changes
-inherit adu-timestamp-check
+# Only enabled when delta update feature is turned on (WITH_FEATURE_DELTA_UPDATE='1')
+inherit ${@bb.utils.contains('WITH_FEATURE_DELTA_UPDATE', '1', 'adu-timestamp-check', '', d)}
 
 # Force rebuild when ADU_SOFTWARE_VERSION changes
 # This ensures each update image has the correct version in /etc/adu-version
