@@ -134,7 +134,7 @@ This layer is **board-agnostic** by design. Your BSP (Board Support Package) lay
 - ❌ **Partition layouts** - Board-specific storage strategies and A/B update mechanisms
 - ❌ **Production configuration** - Real versioning strategy, security policies, rollback mechanisms
 
-**Example BSP Layer**: See `meta-raspberrypi-adu` for a complete Raspberry Pi 4 implementation that provides these components.
+**Example BSP Layer**: See `meta-azure-device-update-bsp` for a consolidated BSP layer that provides these components for Raspberry Pi 4, QEMU arm64, and i.MX8ULP EVK.
 
 ---
 
@@ -160,7 +160,7 @@ This layer is **board-agnostic** by design. Your BSP (Board Support Package) lay
 flowchart LR
     subgraph Main[" "]
 
-        subgraph BSP["BSP Layer (e.g. meta-raspberrypi-adu)"]
+        subgraph BSP["BSP Layer (meta-azure-device-update-bsp)"]
             BASE["adu-base-image recipe<br/>Output: adu-base-image.ext4.gz"]
         end
 
@@ -231,7 +231,7 @@ BASE_ADU_SOFTWARE_VERSION ?= "1.0.0"   # Base version (informational)
 
 **Required Base Image:**
 
-The recipes depend on `adu-base-image` by name. Your BSP layer must provide an image recipe named `adu-base-image` (e.g., in `meta-raspberrypi-adu`).
+The recipes depend on `adu-base-image` by name. Your BSP layer must provide an image recipe named `adu-base-image` (e.g., in `meta-azure-device-update-bsp`).
 
 ---
 
@@ -574,7 +574,7 @@ This layer enables multiple Azure Device Update demonstration workflows:
 
 ### Step 1: Create Your Base Image Recipe
 
-In your BSP layer (e.g., `meta-myboard/recipes-core/images/adu-base-image.bb`):
+In your BSP layer (e.g., `meta-azure-device-update-bsp/recipes-core/images/adu-base-image.bb`):
 
 ```bitbake
 require recipes-core/images/core-image-minimal.bb
@@ -1112,7 +1112,7 @@ See [LICENSE](LICENSE) file for full text.
 
 ### Repository Documentation
 - [iot-hub-device-update-yocto Main README](../../README.md) - Build environment guide
-- [meta-raspberrypi-adu README](../meta-raspberrypi-adu/README.md) - Reference BSP example
+- [meta-azure-device-update-bsp README](../meta-azure-device-update-bsp/README.md) - Consolidated BSP layer for all boards
 
 ---
 
