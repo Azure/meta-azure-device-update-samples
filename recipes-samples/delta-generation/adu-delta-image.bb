@@ -37,7 +37,7 @@ python do_clean_old_deploys() {
 addtask clean_old_deploys before do_deploy after do_generate_all_deltas
 
 # Depend on all versioned images and native delta generation tools
-DEPENDS = "adu-update-image-v1 adu-update-image-v2 adu-update-image-v3 iot-hub-device-update-delta-diffgentool-native iot-hub-device-update-delta-processor-native"
+DEPENDS = "adu-update-image-v1 adu-update-image-v2 adu-update-image-v3 adu-update-image-v4 iot-hub-device-update-delta-diffgentool-native iot-hub-device-update-delta-processor-native"
 
 # Task-level dependencies for all delta generation tasks
 # Depend on do_swuimage to ensure SWU files are built and deployed
@@ -68,11 +68,22 @@ do_generate_delta_v2_v3[depends] = "\
     adu-delta-image:do_generate_delta_v1_v3 \
 "
 
+# v3→v4 (the realistic-content delta). Run after v2→v3 to keep v3 source
+# accesses serialized and avoid recompression races.
+do_generate_delta_v3_v4[depends] = "\
+    adu-update-image-v3:do_swuimage \
+    adu-update-image-v4:do_swuimage \
+    iot-hub-device-update-delta-diffgentool-native:do_populate_sysroot \
+    iot-hub-device-update-delta-processor-native:do_populate_sysroot \
+    adu-delta-image:do_generate_delta_v2_v3 \
+"
+
 # Force re-evaluation of delta generation tasks (no stamp file)
 # This ensures BitBake checks dependencies even if task ran before
 do_generate_delta_v1_v2[nostamp] = "1"
 do_generate_delta_v2_v3[nostamp] = "1"
 do_generate_delta_v1_v3[nostamp] = "1"
+do_generate_delta_v3_v4[nostamp] = "1"
 
 # No SRC_URI needed - using native diffgentool binary
 
@@ -248,17 +259,66 @@ sign_recompressed_swu_v3_wrapper() {
         "${DELTA_OUTPUT_DIR}/adu-update-image-v3.0.0-recompressed.swu"
 }
 
+python do_recompress_and_sign_v4() {
+    bb.note("=" * 70)
+    bb.note("Recompressing and signing v4 SWU file")
+    bb.note("=" * 70)
+
+    deploy_dir = d.getVar('DEPLOY_DIR_IMAGE')
+    delta_output_dir = d.getVar('DELTA_OUTPUT_DIR')
+
+    import glob
+    import subprocess
+
+    # Find v4 SWU file
+    swu_files = glob.glob(f"{deploy_dir}/adu-update-image-v4-*.swu")
+    if not swu_files:
+        bb.fatal("No v4 SWU file found in %s" % deploy_dir)
+
+    source_swu = swu_files[0]
+    bb.note(f"Found v4 SWU: {source_swu}")
+
+    os.makedirs(delta_output_dir, exist_ok=True)
+
+    unsigned_swu = f"{delta_output_dir}/adu-update-image-v4.0.0-recompressed-unsigned.swu"
+    signed_swu = f"{delta_output_dir}/adu-update-image-v4.0.0-recompressed.swu"
+
+    bb.note("Step 1: Recompressing v4 SWU...")
+    bb.note(f"  Input:  {source_swu}")
+    bb.note(f"  Output: {unsigned_swu}")
+
+    result = subprocess.run(['recompress', 'swu', source_swu, unsigned_swu],
+                          capture_output=True, text=True)
+    if result.returncode != 0:
+        bb.fatal(f"Recompression failed: {result.stderr}")
+
+    bb.note("Step 2: Signing recompressed v4 SWU...")
+    bb.note(f"  Input:  {unsigned_swu}")
+    bb.note(f"  Output: {signed_swu}")
+
+    bb.build.exec_func('sign_recompressed_swu_v4_wrapper', d)
+}
+
+sign_recompressed_swu_v4_wrapper() {
+    sign_recompressed_swu \
+        "${DELTA_OUTPUT_DIR}/adu-update-image-v4.0.0-recompressed-unsigned.swu" \
+        "${DELTA_OUTPUT_DIR}/adu-update-image-v4.0.0-recompressed.swu"
+}
+
 addtask recompress_and_sign_v1 after do_unpack before do_generate_delta_v1_v2
 addtask recompress_and_sign_v2 after do_unpack before do_generate_delta_v1_v2  
 addtask recompress_and_sign_v3 after do_unpack before do_generate_delta_v2_v3
+addtask recompress_and_sign_v4 after do_unpack before do_generate_delta_v3_v4
 
 DELTA_OUTPUT_DIR = "${WORKDIR}/delta-output"
 DELTA_FILE_NAME_V1_V2 = "adu-delta-v1-to-v2.diff"
 DELTA_FILE_NAME_V2_V3 = "adu-delta-v2-to-v3.diff"
 DELTA_FILE_NAME_V1_V3 = "adu-delta-v1-to-v3.diff"
+DELTA_FILE_NAME_V3_V4 = "adu-delta-v3-to-v4.diff"
 RECOMPRESSED_FILE_V1 = "adu-update-image-v1-recompressed.swu"
 RECOMPRESSED_FILE_V2 = "adu-update-image-v2-recompressed.swu"
 RECOMPRESSED_FILE_V3 = "adu-update-image-v3-recompressed.swu"
+RECOMPRESSED_FILE_V4 = "adu-update-image-v4-recompressed.swu"
 DEPLOYDIR = "${DEPLOY_DIR_IMAGE}"
 
 # Export signing key paths to task environment
@@ -266,6 +326,7 @@ DEPLOYDIR = "${DEPLOY_DIR_IMAGE}"
 do_recompress_and_sign_v1[vardeps] += "ADUC_PRIVATE_KEY ADUC_PRIVATE_KEY_PASSWORD"
 do_recompress_and_sign_v2[vardeps] += "ADUC_PRIVATE_KEY ADUC_PRIVATE_KEY_PASSWORD"
 do_recompress_and_sign_v3[vardeps] += "ADUC_PRIVATE_KEY ADUC_PRIVATE_KEY_PASSWORD"
+do_recompress_and_sign_v4[vardeps] += "ADUC_PRIVATE_KEY ADUC_PRIVATE_KEY_PASSWORD"
 
 # Task dependencies: Recompression tasks depend on SWU files and native tools
 do_recompress_and_sign_v1[depends] = "\
@@ -280,6 +341,11 @@ do_recompress_and_sign_v2[depends] = "\
 
 do_recompress_and_sign_v3[depends] = "\
     adu-update-image-v3:do_swuimage \
+    iot-hub-device-update-delta-processor-native:do_populate_sysroot \
+"
+
+do_recompress_and_sign_v4[depends] = "\
+    adu-update-image-v4:do_swuimage \
     iot-hub-device-update-delta-processor-native:do_populate_sysroot \
 "
 
@@ -300,6 +366,12 @@ do_generate_delta_v2_v3[depends] = "\
 do_generate_delta_v1_v3[depends] = "\
     adu-delta-image:do_recompress_and_sign_v1 \
     adu-delta-image:do_recompress_and_sign_v3 \
+    iot-hub-device-update-delta-diffgentool-native:do_populate_sysroot \
+"
+
+do_generate_delta_v3_v4[depends] = "\
+    adu-delta-image:do_recompress_and_sign_v3 \
+    adu-delta-image:do_recompress_and_sign_v4 \
     iot-hub-device-update-delta-diffgentool-native:do_populate_sysroot \
 "
 
@@ -604,6 +676,39 @@ do_generate_delta_v1_v3() {
 }
 
 addtask generate_delta_v1_v3 after do_unpack before do_test_delta_v1_v3
+
+# Task 4: Generate v3 -> v4 delta (the realistic-content demo delta)
+do_generate_delta_v3_v4() {
+    export PATH="${STAGING_BINDIR_NATIVE}:${PATH}"
+    export LD_LIBRARY_PATH="${STAGING_LIBDIR_NATIVE}:${LD_LIBRARY_PATH}"
+
+    bbnote "======================================================================"
+    bbnote "TASK: do_generate_delta_v3_v4"
+    bbnote "Using pre-created recompressed+signed SWU files"
+    bbnote "======================================================================"
+
+    RECOMPRESSED_V3="${DELTA_OUTPUT_DIR}/adu-update-image-v3.0.0-recompressed.swu"
+    RECOMPRESSED_V4="${DELTA_OUTPUT_DIR}/adu-update-image-v4.0.0-recompressed.swu"
+
+    if [ ! -f "$RECOMPRESSED_V3" ]; then
+        bbfatal "Recompressed v3 file not found: $RECOMPRESSED_V3 (should be created by do_recompress_and_sign_v3)"
+    fi
+
+    if [ ! -f "$RECOMPRESSED_V4" ]; then
+        bbfatal "Recompressed v4 file not found: $RECOMPRESSED_V4 (should be created by do_recompress_and_sign_v4)"
+    fi
+
+    bbnote "Using recompressed files:"
+    bbnote "  v3: $RECOMPRESSED_V3"
+    bbnote "  v4: $RECOMPRESSED_V4"
+
+    delta_file="${DELTA_FILE_NAME_V3_V4}"
+
+    generate_delta_shell "$RECOMPRESSED_V3" "$RECOMPRESSED_V4" \
+        "$delta_file" "3.0.0" "4.0.0"
+}
+
+addtask generate_delta_v3_v4 after do_unpack before do_test_delta_v3_v4
 
 # Import manifest generation moved to adu-delta-test-package recipe
 # The generate_import_manifest() function has been removed to avoid confusion
@@ -912,6 +1017,101 @@ do_test_delta_v1_v3() {
 
 addtask test_delta_v1_v3 after do_generate_delta_v1_v3 before do_deploy
 
+# Test task for v3 -> v4 (the realistic-content demo delta)
+do_test_delta_v3_v4() {
+    export PATH="/usr/bin:${PATH}"
+
+    SWU_V3=$(find ${DEPLOY_DIR_IMAGE} -maxdepth 1 -name 'adu-update-image-v3-*.swu' -type f | head -n1)
+    SWU_V4=$(find ${DEPLOY_DIR_IMAGE} -maxdepth 1 -name 'adu-update-image-v4-*.swu' -type f | head -n1)
+
+    if [ -z "$SWU_V3" ] || [ -z "$SWU_V4" ]; then
+        bbfatal "SWU files not found for testing: v3=$SWU_V3 v4=$SWU_V4"
+    fi
+
+    bbnote "====================================="
+    bbnote "Testing Delta: v3 -> v4"
+    bbnote "====================================="
+
+    DELTA_FILE="${DELTA_OUTPUT_DIR}/${DELTA_FILE_NAME_V3_V4}"
+    RECOMPRESSED_V4="${DELTA_OUTPUT_DIR}/adu-update-image-v4.0.0-recompressed.swu"
+
+    bbnote "Validating PAMZ format..."
+    if [ ! -f "$DELTA_FILE" ]; then
+        bbfatal "Delta file not found: $DELTA_FILE"
+    fi
+
+    MAGIC=$(hexdump -n 4 -e '4/1 "%02x" "\n"' "$DELTA_FILE")
+    if [ "$MAGIC" != "50414d5a" ]; then
+        bbfatal "Invalid PAMZ magic bytes! Expected: 50414d5a, Got: $MAGIC"
+    fi
+
+    bbnote "✓ PAMZ format validated (magic: $MAGIC)"
+
+    if [ ! -f "$RECOMPRESSED_V4" ]; then
+        bbfatal "Recompressed target not found: $RECOMPRESSED_V4"
+    fi
+
+    DELTA_SIZE=$(stat -c%s "$DELTA_FILE")
+    RECOMP_SIZE=$(stat -c%s "$RECOMPRESSED_V4")
+    COMPRESSION=$(awk "BEGIN {printf \"%.2f\", ($DELTA_SIZE / $RECOMP_SIZE) * 100}")
+
+    bbnote "✓ PAMZ format validated"
+    bbnote "  Delta size: $DELTA_SIZE bytes"
+    bbnote "  Recompressed target: $RECOMP_SIZE bytes"
+    bbnote "  Compression ratio: $COMPRESSION%"
+
+    # v3->v4 includes ~4 MiB of incompressible payload; the delta should be
+    # in the 2-8 MB range. Warn (not fail) if outside that band to keep
+    # surprising changes visible without blocking builds during iteration.
+    if [ "$DELTA_SIZE" -lt 2097152 ] || [ "$DELTA_SIZE" -gt 8388608 ]; then
+        bbwarn "v3→v4 delta size $DELTA_SIZE bytes is outside the expected 2-8 MB demo band"
+    fi
+
+    bbnote ""
+    bbnote "Applying delta to verify reconstruction..."
+
+    RECOMPRESSED_V3="${DELTA_OUTPUT_DIR}/adu-update-image-v3.0.0-recompressed.swu"
+    if [ ! -f "$RECOMPRESSED_V3" ]; then
+        bbfatal "Recompressed source (v3) not found: $RECOMPRESSED_V3"
+    fi
+
+    RECONSTRUCTED="${DELTA_OUTPUT_DIR}/reconstructed-v4-from-v3.swu"
+
+    export LD_LIBRARY_PATH="${STAGING_LIBDIR_NATIVE}:${LD_LIBRARY_PATH}"
+    export PATH="${STAGING_BINDIR_NATIVE}:${PATH}"
+
+    bbnote "  Source: $(basename $RECOMPRESSED_V3)"
+    bbnote "  Delta: $(basename $DELTA_FILE)"
+    bbnote "  Target: $(basename $RECOMPRESSED_V4)"
+    bbnote "  Reconstructing to: $(basename $RECONSTRUCTED)"
+
+    if ! applydiff "$RECOMPRESSED_V3" "$DELTA_FILE" "$RECONSTRUCTED"; then
+        bbfatal "Failed to apply delta! applydiff returned error."
+    fi
+
+    if [ ! -f "$RECONSTRUCTED" ]; then
+        bbfatal "Reconstructed file was not created: $RECONSTRUCTED"
+    fi
+
+    RECON_HASH=$(sha256sum "$RECONSTRUCTED" | awk '{print $1}')
+    TARGET_HASH=$(sha256sum "$RECOMPRESSED_V4" | awk '{print $1}')
+
+    if [ "$RECON_HASH" = "$TARGET_HASH" ]; then
+        bbnote "✓ SUCCESS: Reconstruction verified!"
+        bbnote "  SHA256: $RECON_HASH"
+    else
+        bberror "FAILED: Reconstructed file does not match target!"
+        bberror "  Expected: $TARGET_HASH"
+        bberror "  Got:      $RECON_HASH"
+        bbfatal "Delta reconstruction verification failed"
+    fi
+
+    rm -f "$RECONSTRUCTED"
+    bbnote "====================================="
+}
+
+addtask test_delta_v3_v4 after do_generate_delta_v3_v4 before do_deploy
+
 do_deploy() {
     install -d ${DEPLOYDIR}
     
@@ -1168,8 +1368,7 @@ python do_verify_delta_v1_v3() {
     source = os.path.join(delta_dir, 'adu-update-image-v1.0.0-recompressed.swu')
     delta = os.path.join(delta_dir, 'adu-delta-v1-to-v3.diff')
     target = os.path.join(delta_dir, 'adu-update-image-v3.0.0-recompressed.swu')
-    reconstructed = os.path.join(delta_dir, 'v3-from-v1-reconstructed-verify.swu')
-    
+    reconstructed = os.path.join(delta_dir, 'v3-from-v1-reconstructed-verify.swu')    
     bb.note("=" * 80)
     bb.note("Verifying delta v1→v3 reconstruction")
     bb.note("=" * 80)
@@ -1227,6 +1426,71 @@ python do_verify_delta_v1_v3() {
     bb.note("=" * 80)
 }
 
+python do_verify_delta_v3_v4() {
+    import subprocess
+    import os
+
+    delta_dir = d.getVar('DELTA_OUTPUT_DIR')
+    staging_bindir = d.getVar('STAGING_BINDIR_NATIVE')
+    staging_base = os.path.dirname(os.path.dirname(staging_bindir))
+
+    source = os.path.join(delta_dir, 'adu-update-image-v3.0.0-recompressed.swu')
+    delta = os.path.join(delta_dir, 'adu-delta-v3-to-v4.diff')
+    target = os.path.join(delta_dir, 'adu-update-image-v4.0.0-recompressed.swu')
+    reconstructed = os.path.join(delta_dir, 'v4-reconstructed-verify.swu')
+
+    bb.note("=" * 80)
+    bb.note("Verifying delta v3→v4 reconstruction (realistic-content demo delta)")
+    bb.note("=" * 80)
+
+    lib_paths = []
+    sysroots_components = os.path.join(staging_base, 'sysroots-components', 'x86_64')
+    if os.path.exists(sysroots_components):
+        for root, dirs, files in os.walk(sysroots_components):
+            if os.path.basename(root) == 'lib':
+                lib_paths.append(root)
+
+    env = os.environ.copy()
+    env['LD_LIBRARY_PATH'] = ':'.join(lib_paths + [env.get('LD_LIBRARY_PATH', '')])
+    env['PATH'] = staging_bindir + ':' + env.get('PATH', '')
+
+    cmd = ['applydiff', source, delta, reconstructed]
+    bb.note(f"Running: {' '.join(cmd)}")
+
+    try:
+        result = subprocess.run(cmd, env=env, capture_output=True, text=True, check=True)
+        bb.note(result.stdout)
+        if result.stderr:
+            bb.note(result.stderr)
+    except subprocess.CalledProcessError as e:
+        bb.fatal(f"applydiff failed: {e.stderr}")
+
+    if not os.path.exists(reconstructed):
+        bb.fatal("Reconstructed file was not created")
+
+    import hashlib
+    def sha256_file(path):
+        h = hashlib.sha256()
+        with open(path, 'rb') as f:
+            for chunk in iter(lambda: f.read(8192), b''):
+                h.update(chunk)
+        return h.hexdigest()
+
+    reconstructed_hash = sha256_file(reconstructed)
+    target_hash = sha256_file(target)
+
+    bb.note(f"Reconstructed SHA256: {reconstructed_hash}")
+    bb.note(f"Target SHA256:        {target_hash}")
+
+    if reconstructed_hash == target_hash:
+        bb.note("✅ SUCCESS: v3 + delta-v3-v4 = v4 (verified)")
+    else:
+        bb.fatal("❌ FAIL: Reconstructed file does not match target v4")
+
+    os.remove(reconstructed)
+    bb.note("=" * 80)
+}
+
 # Verification tasks depend on delta generation and applydiff tool
 do_verify_delta_v1_v2[depends] = "\
     adu-delta-image:do_generate_delta_v1_v2 \
@@ -1243,9 +1507,15 @@ do_verify_delta_v1_v3[depends] = "\
     iot-hub-device-update-delta-processor-native:do_populate_sysroot \
 "
 
+do_verify_delta_v3_v4[depends] = "\
+    adu-delta-image:do_generate_delta_v3_v4 \
+    iot-hub-device-update-delta-processor-native:do_populate_sysroot \
+"
+
 addtask verify_delta_v1_v2 after do_generate_delta_v1_v2 before do_verify_all_deltas
 addtask verify_delta_v2_v3 after do_generate_delta_v2_v3 before do_verify_all_deltas
 addtask verify_delta_v1_v3 after do_generate_delta_v1_v3 before do_verify_all_deltas
+addtask verify_delta_v3_v4 after do_generate_delta_v3_v4 before do_verify_all_deltas
 
 # Aggregate verification task
 python do_verify_all_deltas() {
@@ -1254,7 +1524,7 @@ python do_verify_all_deltas() {
     bb.note("=" * 80)
 }
 
-addtask verify_all_deltas after do_verify_delta_v1_v2 do_verify_delta_v2_v3 do_verify_delta_v1_v3 before do_deploy
+addtask verify_all_deltas after do_verify_delta_v1_v2 do_verify_delta_v2_v3 do_verify_delta_v1_v3 do_verify_delta_v3_v4 before do_deploy
 
 # No packages to create - this is a deploy-only recipe
 PACKAGES = ""

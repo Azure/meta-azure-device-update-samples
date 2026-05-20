@@ -12,6 +12,7 @@ do_install[depends] = " \
     adu-update-image-v1:do_build \
     adu-update-image-v2:do_build \
     adu-update-image-v3:do_build \
+    adu-update-image-v4:do_build \
     adu-delta-image:do_deploy \
 "
 
@@ -60,6 +61,7 @@ do_install() {
     install -d ${PACKAGE_DIR}/update-1.0.0
     install -d ${PACKAGE_DIR}/update-2.0.0
     install -d ${PACKAGE_DIR}/update-3.0.0
+    install -d ${PACKAGE_DIR}/update-4.0.0
     
     DEPLOY_DIR="${DEPLOY_DIR_IMAGE}"
     
@@ -124,7 +126,7 @@ do_install() {
     
     # Copy original update images from their work directories
     # Note: PACKAGE_ARCH contains underscores like "raspberrypi4_64"
-    for version in v1 v2 v3; do
+    for version in v1 v2 v3 v4; do
         # Use find to locate the work directory regardless of arch formatting
         WORKDIR_UPDATE=$(find ${TMPDIR}/work -type d -name "adu-update-image-${version}" 2>/dev/null | head -1)
         if [ -n "${WORKDIR_UPDATE}" ]; then
@@ -145,7 +147,7 @@ do_install() {
     DELTA_WORKDIR="${TMPDIR}/work/${TUNE_PKGARCH}-poky-linux/adu-delta-image/1.0/delta-output"
     
     # Copy recompressed images - check deploy directory first, then work directory
-    for version in v1.0.0 v2.0.0 v3.0.0; do
+    for version in v1.0.0 v2.0.0 v3.0.0 v4.0.0; do
         RECOMP_FILE="adu-update-image-${version}-recompressed.swu"
         COPIED=0
         
@@ -167,7 +169,7 @@ do_install() {
     done
     
     # Copy delta files - check deploy directory first, then work directory
-    for delta in adu-delta-v1-to-v2.diff adu-delta-v1-to-v3.diff adu-delta-v2-to-v3.diff; do
+    for delta in adu-delta-v1-to-v2.diff adu-delta-v1-to-v3.diff adu-delta-v2-to-v3.diff adu-delta-v3-to-v4.diff; do
         COPIED=0
         
         # Try deploy directory first
@@ -274,6 +276,18 @@ do_install() {
         bbwarn "Manifest not found: ${MANIFEST_V3}"
     fi
     
+    # Update 4.0.0: v3 → v4 (realistic content-change delta demo)
+    MANIFEST_V4="${ADU_IMPORTMANIFEST_PROVIDER}.${ADU_IMPORTMANIFEST_NAME}.4.0.0.importmanifest.json"
+    if [ -f "${PACKAGE_DIR}/images/${MANIFEST_V4}" ]; then
+        mv "${PACKAGE_DIR}/images/${MANIFEST_V4}" ${PACKAGE_DIR}/update-4.0.0/
+        mv "${PACKAGE_DIR}/images/adu-delta-v3-to-v4.diff" ${PACKAGE_DIR}/update-4.0.0/
+        mv "${PACKAGE_DIR}/images/adu-update-image-v4.0.0-recompressed.swu" ${PACKAGE_DIR}/update-4.0.0/
+        cp "${PACKAGE_DIR}/images/yocto-a-b-update.sh" ${PACKAGE_DIR}/update-4.0.0/
+        bbnote "✓ Created update-4.0.0/ (v3 → v4 delta - realistic content change)"
+    else
+        bbwarn "Manifest not found: ${MANIFEST_V4}"
+    fi
+    
     # Copy scripts (they're in S which is WORKDIR)
     cp ${S}/cache_manager.sh ${PACKAGE_DIR}/scripts/
     cp ${S}/delta_operations.py ${PACKAGE_DIR}/scripts/
@@ -293,7 +307,7 @@ Comprehensive test package for round-trip delta update verification.
 
 ## Contents
 
-- **images/**: Base image, update v1/v2/v3, recompressed versions, delta files, manifests
+- **images/**: Base image, update v1/v2/v3/v4, recompressed versions, delta files, manifests
 - **scripts/**: cache_manager.sh, delta_operations.py (on-device testing scripts)
 - **docs/**: BUILD-TOOLS.md (native build tool reference), testing guides
 - **update-X.X.X/**: Ready-to-deploy update packages with manifests
@@ -344,7 +358,7 @@ Comprehensive test package for round-trip delta update verification.
 
 **Store all versions:**
 ```bash
-for version in v1 v2 v3; do
+for version in v1 v2 v3 v4; do
     ./scripts/cache_manager.sh store \
         images/adu-update-image-${version}-recompressed.swu \
         "Contoso" "${version:1}.0.0"
@@ -405,7 +419,7 @@ README_EOF
 ## Test Scenarios
 
 ### 1. Cache Population
-- Store v1, v2, v3 in cache
+- Store v1, v2, v3, v4 in cache
 - Verify ownership (adu:adu)
 - Verify permissions (644 files, 755 dirs)
 

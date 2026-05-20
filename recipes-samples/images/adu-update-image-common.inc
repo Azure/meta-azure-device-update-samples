@@ -122,6 +122,28 @@ do_create_versioned_image() {
     bbnote "Verifying /etc/adu-version content..."
     debugfs -R "cat /etc/adu-version" $WORK/rootfs.ext4 | head -1 | grep -q "${ADU_SOFTWARE_VERSION}" || bbwarn "Version verification failed"
 
+    # ---- ADU_VERSIONED_IMAGE_POSTPROCESS_COMMAND hook ---------------------
+    # Modeled after IMAGE_POSTPROCESS_COMMAND in image.bbclass: the variable
+    # holds a `; `-separated list of shell function names. Inlining the
+    # variable below causes the shell to evaluate it as a sequence of
+    # function calls, e.g. "fn_a; fn_b; " -> calls fn_a then fn_b. Each
+    # function runs in the task's shell context with these env vars exported:
+    #   ADU_ROOTFS_EXT4 - absolute path to the working ext4 image (debugfs -w)
+    #   ADU_SOFTWARE_VERSION - target version string (e.g. "1.0.0.4")
+    # Idempotency contract: hooks MUST tolerate re-runs (use `debugfs rm` for
+    # any file path before `debugfs write`).
+    # -----------------------------------------------------------------------
+    export ADU_ROOTFS_EXT4="$WORK/rootfs.ext4"
+    export ADU_SOFTWARE_VERSION="${ADU_SOFTWARE_VERSION}"
+    if [ -n "${ADU_VERSIONED_IMAGE_POSTPROCESS_COMMAND}" ]; then
+        bbnote "======================================================================"
+        bbnote "RUNNING ADU_VERSIONED_IMAGE_POSTPROCESS_COMMAND hooks"
+        bbnote "  Commands: ${ADU_VERSIONED_IMAGE_POSTPROCESS_COMMAND}"
+        bbnote "======================================================================"
+        ${ADU_VERSIONED_IMAGE_POSTPROCESS_COMMAND}
+        bbnote "✓ All ADU postprocess hooks completed"
+    fi
+
     # Compress to deploy directory with correct name
     OUTPUT_FILE="${DEPLOY_DIR_IMAGE}/${PN}-${MACHINE}.ext4.gz"
     bbnote "Compressing to $OUTPUT_FILE..."
@@ -137,7 +159,13 @@ do_create_versioned_image() {
 
 addtask create_versioned_image after do_unpack before do_swuimage
 do_create_versioned_image[depends] += "adu-base-image:do_image_complete e2fsprogs-native:do_populate_sysroot"
-do_create_versioned_image[vardeps] += "ADU_SOFTWARE_VERSION"
+do_create_versioned_image[vardeps] += "ADU_SOFTWARE_VERSION ADU_VERSIONED_IMAGE_POSTPROCESS_COMMAND"
+
+# Default: no extra postprocessing. Versioned recipes may append shell
+# function names to mutate the rootfs ext4 in-place between the version-file
+# write and the final SWU compress step. See the hook block in
+# do_create_versioned_image above for the contract.
+ADU_VERSIONED_IMAGE_POSTPROCESS_COMMAND ??= ""
 
 # Explicit dependency: SWU generation depends on base image
 # This ensures BitBake rebuilds .swu files when base image changes

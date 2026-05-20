@@ -156,7 +156,8 @@ def main():
     swu_files = {
         'v1': 'adu-update-image-v1.0.0-recompressed.swu',
         'v2': 'adu-update-image-v2.0.0-recompressed.swu',
-        'v3': 'adu-update-image-v3.0.0-recompressed.swu'
+        'v3': 'adu-update-image-v3.0.0-recompressed.swu',
+        'v4': 'adu-update-image-v4.0.0-recompressed.swu'
     }
     
     swu_hashes = {}
@@ -176,7 +177,8 @@ def main():
     delta_files = {
         'v1-to-v2': 'adu-delta-v1-to-v2.diff',
         'v1-to-v3': 'adu-delta-v1-to-v3.diff',
-        'v2-to-v3': 'adu-delta-v2-to-v3.diff'
+        'v2-to-v3': 'adu-delta-v2-to-v3.diff',
+        'v3-to-v4': 'adu-delta-v3-to-v4.diff'
     }
     
     delta_hashes = {}
@@ -287,6 +289,39 @@ def main():
         manifest_path = os.path.join(output_dir, f"{args.provider}.{args.name}.3.0.0.importmanifest.json")
         with open(manifest_path, 'w') as f:
             json.dump(manifest_v3, f, indent=2)
+        print(f"  Created: {manifest_path}")
+    
+    # Generate manifest for v4.0.0 (delta from v3 - realistic content-change demo)
+    print("\nGenerating import manifest for v4.0.0 (delta from v3)...")
+    if 'v4' in swu_hashes and 'v3-to-v4' in delta_hashes:
+        related_files_v4 = [
+            {
+                "filename": delta_files['v3-to-v4'],
+                "hash": delta_hashes['v3-to-v4'],
+                "size": delta_sizes['v3-to-v4'],
+                "sourceHash": swu_hashes['v3']
+            }
+        ]
+        
+        manifest_v4 = generate_import_manifest(
+            version="4.0.0",
+            swu_file=swu_files['v4'],
+            swu_hash=swu_hashes['v4'],
+            swu_size=swu_sizes['v4'],
+            script_file=script_file,
+            script_hash=script_hash,
+            script_size=script_size,
+            installed_criteria="1.0.0.4",
+            related_files=related_files_v4,
+            provider=args.provider,
+            name=args.name,
+            manufacturer=args.manufacturer,
+            model=args.model
+        )
+        
+        manifest_path = os.path.join(output_dir, f"{args.provider}.{args.name}.4.0.0.importmanifest.json")
+        with open(manifest_path, 'w') as f:
+            json.dump(manifest_v4, f, indent=2)
         print(f"  Created: {manifest_path}")
     
     print("\n✓ Import manifest generation complete!")
