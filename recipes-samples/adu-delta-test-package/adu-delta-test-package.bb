@@ -14,6 +14,7 @@ do_install[depends] = " \
     adu-update-image-v3:do_build \
     adu-update-image-v4:do_build \
     adu-delta-image:do_deploy \
+    yocto-a-b-update:do_deploy \
 "
 
 # Source files for scripts and documentation
@@ -202,9 +203,16 @@ do_install() {
     # Generate ADU import manifests (replaces old delta manifests)
     bbnote "Generating ADU import manifests..."
     
-    # Find yocto-a-b-update.sh script from base image rootfs
-    UPDATE_SCRIPT=$(find ${TMPDIR}/work -path "*/adu-base-image/*/rootfs/usr/lib/adu/yocto-a-b-update.sh" -type f 2>/dev/null | head -1)
-    
+    # Locate yocto-a-b-update.sh from DEPLOY_DIR_IMAGE (published by the
+    # yocto-a-b-update recipe's do_deploy). Falls back to the historical
+    # rootfs-scrape path so older sstate caches keep working.
+    UPDATE_SCRIPT=""
+    if [ -f "${DEPLOY_DIR}/yocto-a-b-update.sh" ]; then
+        UPDATE_SCRIPT="${DEPLOY_DIR}/yocto-a-b-update.sh"
+    else
+        UPDATE_SCRIPT=$(find ${TMPDIR}/work -path "*/adu-base-image/*/rootfs/usr/lib/adu/yocto-a-b-update.sh" -type f 2>/dev/null | head -1)
+    fi
+
     # Copy update script to images dir for manifest generation
     if [ -n "${UPDATE_SCRIPT}" ] && [ -f "${UPDATE_SCRIPT}" ]; then
         cp "${UPDATE_SCRIPT}" ${PACKAGE_DIR}/images/
