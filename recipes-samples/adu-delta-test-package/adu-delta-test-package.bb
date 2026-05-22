@@ -15,11 +15,12 @@ do_install[depends] = " \
     adu-delta-image:do_deploy \
 "
 
-# Source files for scripts
+# Source files for scripts and documentation
 SRC_URI = " \
     file://cache_manager.sh \
     file://delta_operations.py \
     file://generate_import_manifest.py \
+    file://BUILD-TOOLS.md \
 "
 
 S = "${WORKDIR}"
@@ -52,7 +53,6 @@ do_package_write_deb[noexec] = "1"
 do_install() {
     # Create package directory structure
     install -d ${PACKAGE_DIR}/images
-    install -d ${PACKAGE_DIR}/tools
     install -d ${PACKAGE_DIR}/scripts
     install -d ${PACKAGE_DIR}/docs
     
@@ -241,8 +241,8 @@ do_install() {
     # Update 1.0.0: Base → v1 (full image update with delta caching)
     MANIFEST_V1="${ADU_IMPORTMANIFEST_PROVIDER}.${ADU_IMPORTMANIFEST_NAME}.1.0.0.importmanifest.json"
     if [ -f "${PACKAGE_DIR}/images/${MANIFEST_V1}" ]; then
-        cp "${PACKAGE_DIR}/images/${MANIFEST_V1}" ${PACKAGE_DIR}/update-1.0.0/
-        cp "${PACKAGE_DIR}/images/adu-update-image-v1.0.0-recompressed.swu" ${PACKAGE_DIR}/update-1.0.0/
+        mv "${PACKAGE_DIR}/images/${MANIFEST_V1}" ${PACKAGE_DIR}/update-1.0.0/
+        mv "${PACKAGE_DIR}/images/adu-update-image-v1.0.0-recompressed.swu" ${PACKAGE_DIR}/update-1.0.0/
         cp "${PACKAGE_DIR}/images/yocto-a-b-update.sh" ${PACKAGE_DIR}/update-1.0.0/
         bbnote "✓ Created update-1.0.0/ (base → v1 full image with deltaHandler)"
     else
@@ -252,9 +252,9 @@ do_install() {
     # Update 2.0.0: v1 → v2 (delta update)
     MANIFEST_V2="${ADU_IMPORTMANIFEST_PROVIDER}.${ADU_IMPORTMANIFEST_NAME}.2.0.0.importmanifest.json"
     if [ -f "${PACKAGE_DIR}/images/${MANIFEST_V2}" ]; then
-        cp "${PACKAGE_DIR}/images/${MANIFEST_V2}" ${PACKAGE_DIR}/update-2.0.0/
-        cp "${PACKAGE_DIR}/images/adu-delta-v1-to-v2.diff" ${PACKAGE_DIR}/update-2.0.0/
-        cp "${PACKAGE_DIR}/images/adu-update-image-v2.0.0-recompressed.swu" ${PACKAGE_DIR}/update-2.0.0/
+        mv "${PACKAGE_DIR}/images/${MANIFEST_V2}" ${PACKAGE_DIR}/update-2.0.0/
+        mv "${PACKAGE_DIR}/images/adu-delta-v1-to-v2.diff" ${PACKAGE_DIR}/update-2.0.0/
+        mv "${PACKAGE_DIR}/images/adu-update-image-v2.0.0-recompressed.swu" ${PACKAGE_DIR}/update-2.0.0/
         cp "${PACKAGE_DIR}/images/yocto-a-b-update.sh" ${PACKAGE_DIR}/update-2.0.0/
         bbnote "✓ Created update-2.0.0/ (v1 → v2 delta)"
     else
@@ -264,32 +264,14 @@ do_install() {
     # Update 3.0.0: v1/v2 → v3 (delta updates with multiple paths)
     MANIFEST_V3="${ADU_IMPORTMANIFEST_PROVIDER}.${ADU_IMPORTMANIFEST_NAME}.3.0.0.importmanifest.json"
     if [ -f "${PACKAGE_DIR}/images/${MANIFEST_V3}" ]; then
-        cp "${PACKAGE_DIR}/images/${MANIFEST_V3}" ${PACKAGE_DIR}/update-3.0.0/
-        cp "${PACKAGE_DIR}/images/adu-delta-v1-to-v3.diff" ${PACKAGE_DIR}/update-3.0.0/
-        cp "${PACKAGE_DIR}/images/adu-delta-v2-to-v3.diff" ${PACKAGE_DIR}/update-3.0.0/
-        cp "${PACKAGE_DIR}/images/adu-update-image-v3.0.0-recompressed.swu" ${PACKAGE_DIR}/update-3.0.0/
+        mv "${PACKAGE_DIR}/images/${MANIFEST_V3}" ${PACKAGE_DIR}/update-3.0.0/
+        mv "${PACKAGE_DIR}/images/adu-delta-v1-to-v3.diff" ${PACKAGE_DIR}/update-3.0.0/
+        mv "${PACKAGE_DIR}/images/adu-delta-v2-to-v3.diff" ${PACKAGE_DIR}/update-3.0.0/
+        mv "${PACKAGE_DIR}/images/adu-update-image-v3.0.0-recompressed.swu" ${PACKAGE_DIR}/update-3.0.0/
         cp "${PACKAGE_DIR}/images/yocto-a-b-update.sh" ${PACKAGE_DIR}/update-3.0.0/
         bbnote "✓ Created update-3.0.0/ (v1/v2 → v3 delta)"
     else
         bbwarn "Manifest not found: ${MANIFEST_V3}"
-    fi
-    
-    # Copy tools if available
-    # Note: Tools might be in different work directories, we'll search for them
-    if [ -n "${TMPDIR}" ]; then
-        # Find and copy diffgentool
-        DIFFGEN=$(find ${TMPDIR}/work -name "diffgentool" -type f 2>/dev/null | head -1)
-        if [ -n "${DIFFGEN}" ]; then
-            cp "${DIFFGEN}" ${PACKAGE_DIR}/tools/
-            bbnote "Copied diffgentool"
-        fi
-        
-        # Find and copy dumpextfs
-        DUMPEXTFS=$(find ${TMPDIR}/work -name "dumpextfs" -type f 2>/dev/null | head -1)
-        if [ -n "${DUMPEXTFS}" ]; then
-            cp "${DUMPEXTFS}" ${PACKAGE_DIR}/tools/
-            bbnote "Copied dumpextfs"
-        fi
     fi
     
     # Copy scripts (they're in S which is WORKDIR)
@@ -298,6 +280,10 @@ do_install() {
     chmod +x ${PACKAGE_DIR}/scripts/cache_manager.sh
     chmod +x ${PACKAGE_DIR}/scripts/delta_operations.py
     bbnote "Copied scripts"
+    
+    # Copy documentation
+    cp ${S}/BUILD-TOOLS.md ${PACKAGE_DIR}/docs/
+    bbnote "Copied documentation"
     
     # Create README
     cat > ${PACKAGE_DIR}/README.md << 'README_EOF'
@@ -308,11 +294,14 @@ Comprehensive test package for round-trip delta update verification.
 ## Contents
 
 - **images/**: Base image, update v1/v2/v3, recompressed versions, delta files, manifests
-- **tools/**: Delta processing tools (diffgentool, dumpextfs if available)
-- **scripts/**: cache_manager.sh, delta_operations.py
-- **docs/**: Testing guides
+- **scripts/**: cache_manager.sh, delta_operations.py (on-device testing scripts)
+- **docs/**: BUILD-TOOLS.md (native build tool reference), testing guides
+- **update-X.X.X/**: Ready-to-deploy update packages with manifests
 
 ## Quick Start
+
+> **Note**: This package contains on-device testing tools only. For information about
+> native build tools (diffgentool, applydiff, recompress), see `docs/BUILD-TOOLS.md`.
 
 ### 1. Store Source in Cache
 

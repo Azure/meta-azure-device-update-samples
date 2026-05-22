@@ -2,7 +2,95 @@
 
 **Board-agnostic Yocto layer for Azure Device Update delta generation, testing, and reference workflows**
 
-## ⚠️ Important Notice
+## Table of Contents
+
+- [Why Use This Layer for Delta Updates?](#why-use-this-layer-for-delta-updates)
+- [Important Notice](#important-notice)
+- [Purpose](#purpose)
+- [Architecture Overview](#architecture-overview)
+- [Quick Start](#quick-start)
+  - [Prerequisites](#prerequisites)
+  - [1. Add Layer to Your Build](#1-add-layer-to-your-build)
+  - [2. Build Sample Update Images](#2-build-sample-update-images)
+  - [3. Generate Delta Files](#3-generate-delta-files)
+- [Recipes Provided](#recipes-provided)
+  - [Sample Image Recipes](#sample-image-recipes)
+  - [Delta Generation Recipe](#delta-generation-recipe)
+  - [BBClass: adu-timestamp-check.bbclass](#bbclass-adu-timestamp-checkbbclass)
+- [Layer Configuration](#layer-configuration)
+  - [Layer Dependencies](#layer-dependencies)
+  - [Default Variables](#default-variables)
+  - [Version Strategy](#version-strategy)
+- [Demonstration Scenarios](#demonstration-scenarios)
+  - [Demo 1: Full-Image Update (Basic)](#demo-1-full-image-update-basic)
+  - [Demo 2: Delta Update (Advanced)](#demo-2-delta-update-advanced)
+  - [Demo 3: Multi-Version Update Chain](#demo-3-multi-version-update-chain)
+- [Troubleshooting](#troubleshooting)
+  - [Build Issues](#build-issues)
+  - [Delta Generation Issues](#delta-generation-issues)
+  - [Configuration Issues](#configuration-issues)
+- [Testing and Validation](#testing-and-validation)
+- [Reference Workflow: Adapting for Your Product](#reference-workflow-adapting-for-your-product)
+- [Contributing](#contributing)
+- [License](#license)
+- [Related Documentation](#related-documentation)
+- [Support and Contact](#support-and-contact)
+
+---
+
+## Why Use This Layer for Delta Updates?
+
+**Azure Device Update (ADU) Delta Updates can dramatically reduce OTA bandwidth and deployment costs** — but implementing delta generation in your build pipeline can be complex. This layer solves that problem by providing a **complete, tested, production-ready workflow** for automated delta generation.
+
+### Key Benefits
+
+🚀 **Automated Delta Generation**
+- Integrates directly into your Yocto/BitBake build workflow
+- No manual scripting or external tools needed
+- Generates deltas automatically whenever you build new update images
+
+✅ **Built-in Verification**
+- Every delta is automatically verified during the build
+- Build fails if delta reconstruction doesn't match the target
+- Prevents deployment of corrupted or broken deltas
+
+⚡ **Proven Efficiency**
+- Delta files are considerably smaller than full images — actual savings depend on content differences, filesystem structure, and delta generation algorithms
+- Lower cloud egress costs and deployment time
+- Enable updates over bandwidth-constrained networks (cellular, satellite)
+
+🔧 **Production-Ready Architecture**
+- Task serialization prevents race conditions and file conflicts
+- Automatic cleanup of stale artifacts (no manual intervention)
+- Reproducible builds with proper dependency tracking
+
+📚 **Reference Implementation**
+- Complete example showing best practices
+- Three versioned sample images (v1/v2/v3) for testing
+- Adapt the workflow to your specific hardware and update strategy
+
+### Who Should Use This Layer?
+
+- **Device Builders** — Implementing ADU on embedded devices (Raspberry Pi, custom boards)
+- **Update Builders** — Creating efficient OTA update workflows for IoT fleets
+- **Product Teams** — Reducing bandwidth costs and deployment time for firmware updates
+- **Developers** — Learning ADU delta update capabilities and integration patterns
+
+### What You Get
+
+This layer provides everything needed for delta-enabled ADU deployments:
+- ✅ Automated delta generation between any two update versions
+- ✅ SWU recompression and signing pipeline
+- ✅ Automatic delta reconstruction verification
+- ✅ BitBake integration with proper task dependencies
+- ✅ Sample images demonstrating version management
+- ✅ Complete documentation and troubleshooting guides
+
+**Start reducing your OTA bandwidth today** — just add this layer to your Yocto build and follow the Quick Start guide below.
+
+---
+
+## Important Notice
 
 **This layer is intended for DEMONSTRATION and REFERENCE purposes only.**
 
@@ -52,65 +140,75 @@ This layer is **board-agnostic** by design. Your BSP (Board Support Package) lay
 
 ## Architecture Overview
 
-```
-┌────────────────────────────────────────────────────────────────────┐
-│  BSP Layer (e.g., meta-raspberrypi-adu)                           │
-│  Provides: virtual/adu-base-image                                  │
-│  Output: adu-base-image.ext4.gz (platform-specific rootfs)         │
-└──────────────────────┬─────────────────────────────────────────────┘
-                       │ provides base content
-                       ↓
-┌────────────────────────────────────────────────────────────────────┐
-│  meta-azure-device-update-samples (THIS LAYER)                     │
-│                                                                    │
-│  ┌──────────────────────────────────────────────────────────────┐ │
-│  │ SAMPLE IMAGE RECIPES (Versioning)                            │ │
-│  │  • adu-update-image-v1.bb → v1.0.0-raspberrypi4-64.swu      │ │
-│  │  • adu-update-image-v2.bb → v2.0.0-raspberrypi4-64.swu      │ │
-│  │  • adu-update-image-v3.bb → v3.0.0-raspberrypi4-64.swu      │ │
-│  │  Output: Signed SWUpdate packages with versioned content    │ │
-│  └──────────────────────────────────────────────────────────────┘ │
-│                                                                    │
-│  ┌──────────────────────────────────────────────────────────────┐ │
-│  │ DELTA GENERATION WORKFLOW (adu-delta-image.bb)               │ │
-│  │                                                              │ │
-│  │  Step 1: Recompress & Sign (for each version)               │ │
-│  │    • Extract .swu → decompress .ext4.gz → recompress (PAMZ) │ │
-│  │    • Sign sw-description with RSA-2048                       │ │
-│  │    • Output: v*.0.0-recompressed.swu (3 files each)         │ │
-│  │                                                              │ │
-│  │  Step 2: Generate Deltas (using DiffGenTool)                │ │
-│  │    • v1-recompressed + v2-recompressed → delta-v1-v2.diff   │ │
-│  │    • v2-recompressed + v3-recompressed → delta-v2-v3.diff   │ │
-│  │    • v1-recompressed + v3-recompressed → delta-v1-v3.diff   │ │
-│  │    Tool: C# DiffGenTool (PAMZ format, P/Invoke libadudiffapi)│ │
-│  │                                                              │ │
-│  │  Step 3: Verify Deltas (using applydiff)                    │ │
-│  │    • v1-recompressed + delta-v1-v2 → verify matches v2      │ │
-│  │    • v2-recompressed + delta-v2-v3 → verify matches v3      │ │
-│  │    • v1-recompressed + delta-v1-v3 → verify matches v3      │ │
-│  │    Tool: C++ applydiff (SHA256 hash verification)           │ │
-│  │                                                              │ │
-│  │  Step 4: Deploy                                             │ │
-│  │    • Copy *.diff and *-recompressed.swu to deploy directory │ │
-│  │    • Generate SHA256 checksums for verification             │ │
-│  └──────────────────────────────────────────────────────────────┘ │
-└────────────────────────────────────────────────────────────────────┘
+```mermaid
+%%{init: {'theme': 'base', 'themeVariables': {
+  'primaryColor': '#ffffff',
+  'primaryTextColor': '#1a1a1a',
+  'primaryBorderColor': '#333333',
+  'lineColor': '#333333',
+  'secondaryColor': '#f5f5f5',
+  'tertiaryColor': '#e8e8e8',
+  'mainBkg': '#ffffff',
+  'nodeBorder': '#333333',
+  'clusterBkg': '#f5f5f5',
+  'clusterBorder': '#333333',
+  'titleColor': '#1a1a1a',
+  'edgeLabelBackground': '#ffffff',
+  'fontFamily': 'monospace',
+  'fontSize': '14px'
+}}}%%
+flowchart LR
+    subgraph Main[" "]
 
-Output Location: tmp/deploy/images/<MACHINE>/
-  • adu-update-image-v1.0.0.swu           (Original signed SWU ~240MB)
-  • adu-update-image-v2.0.0.swu           (Original signed SWU ~240MB)
-  • adu-update-image-v3.0.0.swu           (Original signed SWU ~240MB)
-  • adu-update-image-v1.0.0-recompressed.swu  (For delta source)
-  • adu-update-image-v2.0.0-recompressed.swu  (For delta source)
-  • adu-update-image-v3.0.0-recompressed.swu  (For delta source)
-  • adu-delta-v1-to-v2.diff               (Binary delta ~20MB*)
-  • adu-delta-v2-to-v3.diff               (Binary delta ~20MB*)
-  • adu-delta-v1-to-v3.diff               (Binary delta ~44KB*)
+        subgraph BSP["BSP Layer (e.g. meta-raspberrypi-adu)"]
+            BASE["adu-base-image recipe<br/>Output: adu-base-image.ext4.gz"]
+        end
 
-* Delta sizes vary based on actual content changes in the base image.
-  Smaller deltas indicate more similar content between versions.
+        subgraph THIS["meta-azure-device-update-samples (THIS LAYER)"]
+
+            subgraph IMGS["Sample Image Recipes"]
+                V1["adu-update-image-v1.bb → v1 .swu"]
+                V2["adu-update-image-v2.bb → v2 .swu"]
+                V3["adu-update-image-v3.bb → v3 .swu"]
+            end
+
+            subgraph DELTA["Delta Generation Workflow (adu-delta-image.bb)"]
+                S1["Step 1 · Recompress &amp; Sign<br/>Extract .swu → decompress → recompress (PAMZ) → sign RSA-2048"]
+                S2["Step 2 · Generate Deltas (DiffGenTool)<br/>v1+v2 → v1-to-v2.diff | v2+v3 → v2-to-v3.diff | v1+v3 → v1-to-v3.diff"]
+                S3["Step 3 · Verify (applydiff)<br/>Reconstruct target from source+delta → SHA256 match check"]
+                S4["Step 4 · Deploy<br/>Copy .diff and -recompressed.swu to deploy dir"]
+            end
+
+        end
+
+        BASE -->|"provides base content"| IMGS
+        IMGS --> S1
+        S1 --> S2
+        S2 --> S3
+        S3 --> S4
+
+    end
+
+    style Main fill:#ffffff,stroke:#333333,stroke-width:2px,color:#1a1a1a
+    style BSP fill:#f5f5f5,stroke:#333333,stroke-width:1px,color:#1a1a1a
+    style THIS fill:#e6f0ff,stroke:#336699,stroke-width:1px,color:#1a1a1a
+    style IMGS fill:#ffffff,stroke:#666666,stroke-width:1px,color:#1a1a1a
+    style DELTA fill:#ffffff,stroke:#666666,stroke-width:1px,color:#1a1a1a
 ```
+
+**Output** in `tmp/deploy/images/<MACHINE>/`:
+
+| Artifact | Description | Size (sample) |
+|----------|-------------|---------------|
+| `adu-update-image-v*-<MACHINE>.swu` | Original signed SWU packages | Full image |
+| `adu-update-image-v*.0.0-recompressed.swu` | Recompressed for delta source | Full image |
+| `adu-delta-v1-to-v2.diff` | Binary delta (v1→v2) | Varies |
+| `adu-delta-v2-to-v3.diff` | Binary delta (v2→v3) | Varies |
+| `adu-delta-v1-to-v3.diff` | Binary delta (v1→v3, skip) | Varies |
+
+> Delta sizes depend on actual content differences, filesystem structure,
+> and delta generation algorithms. Expect considerably smaller files than
+> full images, but exact savings vary by use case.
 
 ---
 
@@ -121,28 +219,19 @@ Output Location: tmp/deploy/images/<MACHINE>/
 **Required BitBake Variables** (set in `conf/local.conf` or BSP layer):
 
 ```bitbake
-# REQUIRED: Point to your board's base image recipe
-PREFERRED_PROVIDER_virtual/adu-base-image = "adu-base-image"
-
 # REQUIRED: RSA signing keys for SWUpdate package verification
 ADUC_PRIVATE_KEY = "/path/to/keys/priv.pem"          # RSA-2048 private key
 ADUC_PRIVATE_KEY_PASSWORD = "/path/to/keys/priv.pass" # Key password file
-ADUC_PUBLIC_KEY = "/path/to/keys/public.pem"         # RSA public key
 
 # OPTIONAL: ADU manifest metadata (defaults shown)
-ADU_PROVIDER ?= "Contoso"         # Your company/organization name
-ADU_MODEL ?= "Video"              # Device model identifier
-BASE_ADU_SOFTWARE_VERSION ?= "1.0.0"  # Base version for v1 image
+ADU_PROVIDER ?= "Contoso"              # Your company/organization name
+ADU_MODEL ?= "Sample-Device"           # Device model identifier
+BASE_ADU_SOFTWARE_VERSION ?= "1.0.0"   # Base version (informational)
 ```
 
-**Required Recipe Dependencies:**
+**Required Base Image:**
 
-Your BSP layer must have a base image recipe that provides:
-```bitbake
-# In your BSP: recipes-core/images/adu-base-image.bb
-PROVIDES = "virtual/adu-base-image"
-inherit swupdate-image  # For SWUpdate packaging support
-```
+The recipes depend on `adu-base-image` by name. Your BSP layer must provide an image recipe named `adu-base-image` (e.g., in `meta-raspberrypi-adu`).
 
 ---
 
@@ -190,8 +279,10 @@ bitbake adu-delta-image
    - Signs with RSA-2048 key (using `openssl dgst`)
    - Creates `*-recompressed.swu` files (3 files each: sw-description, sw-description.sig, image)
 
-2. **Delta Generation Phase** (Tasks: `do_generate_delta_v1_v2/v2_v3/v1_v3`)
+2. **Delta Generation Phase** (Tasks: `do_generate_delta_v1_v2/v2_v3/v1_v3`) **← RUNS SERIALLY**
    - Uses C# DiffGenTool (PAMZ format, P/Invoke to libadudiffapi.so)
+   - **Task ordering prevents file conflicts:** v1→v2 first, then v1→v3, finally v2→v3
+   - This serialization prevents "Working directory was already used" errors when multiple tasks try to access the same source file (e.g., v1) simultaneously
    - Generates binary diffs between recompressed files
    - Creates `.diff` files
 
@@ -205,15 +296,13 @@ bitbake adu-delta-image
    - Generates SHA256 checksum files for each artifact
 
 **Output files in `tmp/deploy/images/<MACHINE>/`:**
-- `adu-delta-v1-to-v2.diff` (~20MB for this sample implementation)
-- `adu-delta-v2-to-v3.diff` (~20MB for this sample implementation)
-- `adu-delta-v1-to-v3.diff` (~44KB for this sample implementation)
+- `adu-delta-v1-to-v2.diff` (considerably smaller than the full .swu)
+- `adu-delta-v2-to-v3.diff` (considerably smaller than the full .swu)
+- `adu-delta-v1-to-v3.diff` (considerably smaller than the full .swu)
 - `adu-update-image-v*.0.0-recompressed.swu` (3 files)
 - `*.sha256` checksum files
 
 **Note on delta sizes:** The actual delta size depends on the content differences between versions. In this sample implementation, v1→v2 and v2→v3 contain significant changes, while v1→v3 is optimized with minimal differences, demonstrating the range of possible delta sizes.
-
----
 
 ---
 
@@ -222,25 +311,32 @@ bitbake adu-delta-image
 ### Sample Image Recipes
 Located in `recipes-samples/images/`:
 
-- **`adu-update-image-v1.bb`** - Base version (v1.0.0)
-  - Wraps `virtual/adu-base-image` in signed SWUpdate package
-  - Sets `ADU_SOFTWARE_VERSION = "${BASE_ADU_SOFTWARE_VERSION}"`
-  - Inherits: `swupdate-image`
-  - Output: `adu-update-image-v1.0.0-<MACHINE>.swu`
+- **`adu-update-image-v1.bb`** - Base version (v1.0.0.1)
+  - Wraps `adu-base-image` rootfs in a signed SWUpdate package
+  - Sets `ADU_SOFTWARE_VERSION = "1.0.0.1"`
+  - Inherits: `swupdate` (via `adu-update-image-common.inc`)
+  - Output: `adu-update-image-v1-<MACHINE>.swu`
 
-- **`adu-update-image-v2.bb`** - Incremental update (v2.0.0)
-  - Uses `${@oe.utils.inc_pr("BASE_ADU_SOFTWARE_VERSION", 1)}` for auto-versioning
-  - Adds version marker file to demonstrate change detection
-  - Output: `adu-update-image-v2.0.0-<MACHINE>.swu`
+- **`adu-update-image-v2.bb`** - Incremental update (v1.0.0.2)
+  - Sets `ADU_SOFTWARE_VERSION = "1.0.0.2"`
+  - Adds version marker file (`/etc/adu-image-version`) to create content difference from v1
+  - Output: `adu-update-image-v2-<MACHINE>.swu`
 
-- **`adu-update-image-v3.bb`** - Second incremental (v3.0.0)
-  - Uses `${@oe.utils.inc_pr("BASE_ADU_SOFTWARE_VERSION", 2)}`
-  - Output: `adu-update-image-v3.0.0-<MACHINE>.swu`
+- **`adu-update-image-v3.bb`** - Second incremental (v1.0.0.3)
+  - Sets `ADU_SOFTWARE_VERSION = "1.0.0.3"`
+  - Adds version marker file to create content difference from v2
+  - Output: `adu-update-image-v3-<MACHINE>.swu`
+
+- **`adu-update-image-common.inc`** - Shared configuration for all versioned images
+  - Unpacks `adu-base-image.ext4.gz`, stamps `/etc/adu-version` with the target version using `debugfs`, repacks as `${PN}.ext4.gz`
+  - Signs with RSA key, inherits `swupdate` for `.swu` packaging
+  - Deploys `.adu-version` sidecar file for easy version lookup without extracting `.swu`
+  - Inherits `adu-timestamp-check` to auto-clean stale artifacts
 
 **Key Recipe Dependencies:**
 ```bitbake
-DEPENDS = "virtual/adu-base-image swupdate-native openssl-native"
-do_swuimage[depends] = "${PN}:do_image_complete"
+DEPENDS += "adu-base-image swupdate e2fsprogs-native"
+do_swuimage[depends] += "adu-base-image:do_image_complete"
 ```
 
 ### Delta Generation Recipe
@@ -261,9 +357,27 @@ Located in `recipes-samples/delta-generation/`:
   
   - **Task dependencies:**
 ```bitbake
+# Delta generation tasks run SERIALLY to prevent file conflicts
+# when multiple tasks access the same source file (e.g., v1)
 do_generate_delta_v1_v2[depends] = "\
     adu-delta-image:do_recompress_and_sign_v1 \
     adu-delta-image:do_recompress_and_sign_v2 \
+    iot-hub-device-update-delta-diffgentool-native:do_populate_sysroot \
+"
+
+# v1→v3 runs AFTER v1→v2 completes (both access v1 source)
+do_generate_delta_v1_v3[depends] = "\
+    adu-delta-image:do_recompress_and_sign_v1 \
+    adu-delta-image:do_recompress_and_sign_v3 \
+    adu-delta-image:do_generate_delta_v1_v2 \
+    iot-hub-device-update-delta-diffgentool-native:do_populate_sysroot \
+"
+
+# v2→v3 runs LAST (after both v1-based deltas complete)
+do_generate_delta_v2_v3[depends] = "\
+    adu-delta-image:do_recompress_and_sign_v2 \
+    adu-delta-image:do_recompress_and_sign_v3 \
+    adu-delta-image:do_generate_delta_v1_v3 \
     iot-hub-device-update-delta-diffgentool-native:do_populate_sysroot \
 "
 
@@ -273,6 +387,8 @@ do_verify_delta_v1_v2[depends] = "\
 "
 ```
   
+  - **Task serialization:** Delta generation tasks run serially (not in parallel) to prevent file sharing violations when multiple tasks access the same source file simultaneously. For example, v1→v2 and v1→v3 both read the v1 source file, so v1→v3 waits for v1→v2 to complete before starting.
+  
   - **Output files:**
     - `adu-delta-v1-to-v2.diff`, `adu-delta-v2-to-v3.diff`, `adu-delta-v1-to-v3.diff`
     - `adu-update-image-v*.0.0-recompressed.swu` (3 files)
@@ -281,10 +397,30 @@ do_verify_delta_v1_v2[depends] = "\
 ### BBClass: adu-timestamp-check.bbclass
 Located in `classes/`:
 
-- Validates that delta files are newer than their source SWU files
-- Prevents accidental deployment of stale delta files
-- Only active when `WITH_FEATURE_DELTA_UPDATE='1'`
-- Automatically inherited by `adu-delta-image.bb`
+- **Purpose:** Validates that update and delta artifacts are newer than the base image to prevent deployment of stale artifacts
+- **Automatic cleanup:** When stale artifacts are detected (older than the base image), the class automatically removes them and issues warnings instead of failing the build. BitBake will then rebuild the artifacts with correct timestamps.
+- **Activation:** Inherited by `adu-update-image-common.inc` (always active for update images)
+- **Integration:** Automatically inherited by `adu-delta-image.bb`
+
+**Key behavior:**
+```python
+# Instead of failing build with bb.fatal(), automatically cleanup:
+if stale_artifacts:
+    bb.warn("Auto-cleaning %d stale artifact(s)" % len(stale_artifacts))
+    for artifact_file in stale_artifacts:
+        bb.warn("  - Removing: %s" % os.path.basename(artifact_file))
+        os.remove(artifact_file)
+```
+
+This eliminates manual intervention when rebuilding base images, as stale delta files are automatically cleaned up and regenerated.
+
+### Script Handlers
+Located in `recipes-samples/adu-scripts/`:
+
+- **`adu-scripts.bb`** — Delta source caching handler
+  - Installs `microsoft-delta-source-caching.sh` to `/usr/lib/adu/`
+  - Verifies that recompressed SWU files are correctly cached after updates
+  - Runtime dependencies: `bash`, `azure-device-update`, `swupdate`, `u-boot-fw-utils`
 
 ---
 
@@ -311,19 +447,29 @@ LAYERDEPENDS_meta-azure-device-update-samples = " \
 | **azure-device-update** | ADU agent infrastructure | ADU agent recipes, configuration, device management |
 | **iot-hub-device-update-delta** | **CRITICAL for delta generation** | • `bsdiff` - Binary diff tool<br>• `DiffGenTool` - C# PAMZ delta generator<br>• `applydiff` - Delta reconstruction/verification<br>• `recompress` - SWU recompression tool<br>• `libadudiffapi.so` - Core delta library<br>**Without this layer, delta generation will fail** |
 | **swupdate** | SWUpdate packaging framework | SWU creation, signing, CPIO handling |
-| **clang-layer** (transitive) | Clang compiler toolchain | Required by iot-hub-device-update-delta |
+
+> **Note:** `clang-layer` is a transitive dependency — it is required by
+> `iot-hub-device-update-delta`, not by this layer directly.
 
 ### Default Variables
 
-Defined in `conf/distro/include/adu-samples-defaults.inc` (not yet created, uses BitBake defaults):
+Defined in `conf/distro/include/adu-samples-defaults.inc`:
 
 ```bitbake
 # Software version for sample images (override in local.conf)
-BASE_ADU_SOFTWARE_VERSION ?= "1.0.0"
+BASE_ADU_SOFTWARE_VERSION ??= "1.0.0"
 
 # ADU manifest metadata (override in local.conf)
-ADU_PROVIDER ?= "Contoso"
-ADU_MODEL ?= "Video"
+ADU_PROVIDER ??= "Contoso"
+ADU_MODEL ??= "Sample-Device"
+ADU_COMPATIBILITY_HARDWARE ??= "1.0"
+
+# SWUpdate signing keys
+ADUC_PRIVATE_KEY ??= "${TOPDIR}/conf/swupdate-signing/priv.pem"
+ADUC_PRIVATE_KEY_PASSWORD ??= "${TOPDIR}/conf/swupdate-signing/priv.pass"
+
+# Enable delta update feature by default
+WITH_FEATURE_DELTA_UPDATE ??= "1"
 ```
 
 **To customize:** Add to your `conf/local.conf`:
@@ -335,15 +481,15 @@ ADU_MODEL = "YourDevice"
 
 ### Version Strategy
 
-Versions auto-increment based on `BASE_ADU_SOFTWARE_VERSION`:
+Each versioned recipe hardcodes its `ADU_SOFTWARE_VERSION`:
 
 ```
-BASE_ADU_SOFTWARE_VERSION = "1.0.0"  (set in local.conf)
-  ↓
-v1: ADU_SOFTWARE_VERSION = "1.0.0"   (${BASE_ADU_SOFTWARE_VERSION})
-v2: ADU_SOFTWARE_VERSION = "2.0.0"   (${@oe.utils.inc_pr(BASE, 1)})
-v3: ADU_SOFTWARE_VERSION = "3.0.0"   (${@oe.utils.inc_pr(BASE, 2)})
+v1: ADU_SOFTWARE_VERSION = "1.0.0.1"
+v2: ADU_SOFTWARE_VERSION = "1.0.0.2"
+v3: ADU_SOFTWARE_VERSION = "1.0.0.3"
 ```
+
+To change version numbering, edit each `adu-update-image-v*.bb` recipe directly.
 
 **Note:** This is a **demonstration versioning strategy**. Production systems should implement:
 - Semantic versioning (MAJOR.MINOR.PATCH)
@@ -363,7 +509,7 @@ This layer enables multiple Azure Device Update demonstration workflows:
 1. Flash device with base image containing v1
 2. Upload `adu-update-image-v2.swu` and manifest to Azure Portal
 3. Deploy update to device via IoT Hub
-4. Device downloads and installs v2.swu (full package ~240MB)
+4. Device downloads and installs v2.swu (full image package)
 
 **Layer artifacts used**: `adu-update-image-v2.swu`
 
@@ -374,20 +520,21 @@ This layer enables multiple Azure Device Update demonstration workflows:
 **What it demonstrates**: Efficient updates using binary diff patches
 
 **Steps**:
-1. Device running v1 (1.0.0)
+1. Device running v1 (1.0.0.1)
 2. Upload `adu-delta-v1-to-v2.diff` and manifest to Azure
 3. Deploy delta update to device
-4. Device downloads tiny diff (~600 bytes vs 240MB full image)
+4. Device downloads the delta file (considerably smaller than the full image)
 5. Device reconstructs v2 from v1 + diff
 6. Device installs reconstructed v2.swu
 
 **Layer artifacts used**: 
-- `adu-delta-v1-to-v2.diff` (tiny binary patch)
+- `adu-delta-v1-to-v2.diff` (binary patch)
 - `adu-update-image-v1.swu` (required on device as source)
 
 **Benefits**: 
-- **99.9% bandwidth savings** (600 bytes vs 240MB)
-- Faster OTA deployment
+- Significantly reduced download size compared to full image updates
+- Actual savings depend on content differences, filesystem layout, and delta algorithms
+- Faster OTA deployment over bandwidth-constrained connections
 - Lower cloud egress costs
 
 ---
@@ -397,9 +544,9 @@ This layer enables multiple Azure Device Update demonstration workflows:
 **What it demonstrates**: Controlled rollout through multiple versions
 
 **Steps**:
-1. Device at v1 (1.0.0)
-2. Update to v2 (1.0.1) - verify functionality
-3. Update to v3 (1.0.2) - demonstrate continuous updates
+1. Device at v1 (1.0.0.1)
+2. Update to v2 (1.0.0.2) - verify functionality
+3. Update to v3 (1.0.0.3) - demonstrate continuous updates
 4. Optional: Rollback from v3 → v2 → v1
 
 **Layer artifacts used**:
@@ -411,28 +558,13 @@ This layer enables multiple Azure Device Update demonstration workflows:
 
 ---
 
-### Demo 4: Import Manifest Generation
-**Requirements**: Azure Device Update account
-**What it demonstrates**: Automated manifest creation for Azure Portal
-
-**Steps**:
-1. Build images and manifests: `bitbake adu-import-manifests`
-2. Navigate to `tmp/deploy/images/<MACHINE>/import-manifests/`
-3. Find JSON manifests for each update package
-4. Import to Azure Portal via UI or CLI
-5. Deploy to device groups
-
-**Layer artifacts used**: `adu-import-manifests-v*.json`
-
----
-
 ## Feature Requirements Matrix
 
 | Feature | Layer Components | BSP Requirements | External Requirements |
 |---------|-----------------|------------------|----------------------|
-| **Full Image Updates** | adu-update-image-v*.bb | virtual/adu-base-image provider, Boot A/B slots | Azure IoT Hub, ADU account |
+| **Full Image Updates** | adu-update-image-v*.bb | `adu-base-image` recipe, Boot A/B slots | Azure IoT Hub, ADU account |
 | **Delta Updates** | adu-delta-image.bb | Same as above + storage for temp files | ADU with delta support enabled |
-| **Manifest Generation** | adu-import-manifests.bb | Image metadata (version, size) | None (offline operation) |
+| **Test Package** | adu-delta-test-package.bb | All images + delta artifacts built | None (offline packaging) |
 | **Version Testing** | All three versioned images | Persistence across updates | Test IoT Hub instance |
 | **Rollback Demo** | v1, v2, v3 images | A/B boot slots with fallback | ADU agent with rollback support |
 
@@ -442,15 +574,12 @@ This layer enables multiple Azure Device Update demonstration workflows:
 
 ### Step 1: Create Your Base Image Recipe
 
-In your BSP layer (e.g., `meta-myboard/recipes-core/images/myboard-base.bb`):
+In your BSP layer (e.g., `meta-myboard/recipes-core/images/adu-base-image.bb`):
 
 ```bitbake
 require recipes-core/images/core-image-minimal.bb
 
 DESCRIPTION = "My board base image for ADU"
-
-# Essential: Provide virtual interface
-PROVIDES = "virtual/adu-base-image"
 
 # Add your board-specific packages
 IMAGE_INSTALL:append = " \
@@ -462,12 +591,12 @@ IMAGE_INSTALL:append = " \
 inherit adu-filesystem-layout
 ```
 
+> **Note:** The recipe must be named `adu-base-image` because the sample
+> image recipes depend on it by that name.
+
 ### Step 2: Configure local.conf
 
 ```bitbake
-# Point to your base image
-PREFERRED_PROVIDER_virtual/adu-base-image = "myboard-base"
-
 # Set your company/model info
 ADU_PROVIDER = "MyCompany"
 ADU_MODEL = "MyDevice-v1"
@@ -487,78 +616,29 @@ The sample images will automatically wrap your board's base image in SWUpdate fo
 
 ---
 
-## Layer Configuration
-
-### Default Variables (can be overridden)
-
-Defined in `conf/distro/include/adu-samples-defaults.inc`:
-
-```bitbake
-# Software version for all samples
-BASE_ADU_SOFTWARE_VERSION ?= "1.0.0"
-
-# ADU manifest metadata
-ADU_PROVIDER ?= "Contoso"
-ADU_MODEL ?= "Video"
-```
-
-### Layer Dependencies
-
-Defined in `conf/layer.conf`:
-
-```bitbake
-LAYERDEPENDS_meta-azure-device-update-samples = " \
-    core \
-    azure-device-update \
-    iot-hub-device-update-delta \
-    swupdate \
-"
-```
-
-**What each dependency provides:**
-
-- **core** (openembedded-core) - Base Yocto functionality
-- **azure-device-update** - ADU agent, configuration infrastructure, and device management
-- **iot-hub-device-update-delta** - **Critical for delta generation**:
-  - `bsdiff` - Binary diff tool for efficient patch generation (enables 99.9% bandwidth savings)
-  - Delta processor library for applying patches on devices
-  - zstd integration for high-performance compression
-  - Without this layer, delta generation will fail
-- **swupdate** - SWUpdate framework for creating atomic .swu update packages
-- **clang-layer** (transitive dependency via iot-hub-device-update-delta) - Clang compiler toolchain
-
-### Recipe Naming Convention
-
-- **Samples**: `recipes-samples/images/adu-update-image-v*.bb`
-- **Delta**: `recipes-samples/delta-generation/adu-delta-image.bb`
-- **Manifests**: `recipes-samples/delta-generation/adu-import-manifests.bb`
-
----
-
----
-
 ## Troubleshooting
 
 ### Build Issues
 
-#### Issue: "Nothing PROVIDES virtual/adu-base-image"
+#### Issue: "adu-base-image" recipe not found
 
-**Cause:** Your BSP layer doesn't provide the required virtual interface.
+**Cause:** Your BSP layer doesn't provide an `adu-base-image` recipe.
 
 **Solution:**
-1. Add to your base image recipe:
-   ```bitbake
-   PROVIDES = "virtual/adu-base-image"
-   ```
 
-2. Set preferred provider in `local.conf`:
-   ```bitbake
-   PREFERRED_PROVIDER_virtual/adu-base-image = "your-base-image-name"
-   ```
+The sample image recipes depend on `adu-base-image` by name. Ensure your BSP layer provides a recipe with this name:
 
-3. Verify with:
-   ```bash
-   bitbake-getvar PREFERRED_PROVIDER_virtual/adu-base-image
+```bitbake
+# In your BSP: recipes-core/images/adu-base-image.bb
+DESCRIPTION = "My board base image for ADU"
+require recipes-core/images/core-image-minimal.bb
+IMAGE_INSTALL:append = " azure-device-update "
+```
+
+Verify the recipe is visible:
+```bash
+bitbake-layers show-recipes adu-base-image
+```
    ```
 
 ---
@@ -615,7 +695,51 @@ LAYERDEPENDS_meta-azure-device-update-samples = " \
 
 ---
 
-### Delta Generation Issues
+#### Issue: "Working directory was already used by another instance"
+
+**Cause:** Multiple delta generation tasks running in parallel tried to access the same source file simultaneously (e.g., both v1→v2 and v1→v3 accessing the v1 source file).
+
+**Solution:** This issue is **already fixed** in the current version through task serialization. Delta generation tasks now run serially:
+- v1→v2 completes first
+- v1→v3 runs after v1→v2 (both need v1 source)
+- v2→v3 runs last (after both v1-based deltas complete)
+
+If you're using an older version of this layer, update to the latest version or manually add task dependencies:
+```bitbake
+do_generate_delta_v1_v3[depends] += "adu-delta-image:do_generate_delta_v1_v2"
+do_generate_delta_v2_v3[depends] += "adu-delta-image:do_generate_delta_v1_v3"
+```
+
+---
+
+#### Issue: "Timestamp validation failed - artifacts older than base image"
+
+**Cause:** Base image was rebuilt, but delta files from previous build still exist with older timestamps.
+
+**Solution:** This issue is **automatically handled** in the current version. The `adu-timestamp-check.bbclass` now:
+1. Detects stale artifacts (older than base image)
+2. Issues warnings about auto-cleanup
+3. Removes stale files automatically
+4. Allows BitBake to regenerate them with correct timestamps
+
+**Old behavior (manual intervention required):**
+```
+ERROR: Timestamp validation failed!
+# User had to manually: rm -f tmp/deploy/images/*/adu-delta*.diff
+```
+
+**New behavior (automatic):**
+```
+WARNING: Auto-cleaning 3 stale artifact(s)
+WARNING:   - Removing: adu-delta-v1-to-v2.diff
+WARNING:   - Removing: adu-delta-v2-to-v3.diff
+WARNING:   - Removing: adu-delta-v1-to-v3.diff
+# BitBake automatically regenerates them
+```
+
+No manual intervention needed!
+
+---
 
 #### Issue: Delta files are unexpectedly large (>50MB)
 
@@ -728,6 +852,54 @@ LAYERSERIES_COMPAT_meta-azure-device-update-samples = "scarthgap"
 
 ---
 
+#### Issue: SWUpdate fails with "Broken pipe" or "Image invalid or corrupted"
+
+**Symptoms:**
+- Device logs show: `swupdate_image_write failed: Broken pipe`
+- Error message: `description file name not the first of the list`
+- SWUpdate rejects recompressed `.swu` files but accepts original files
+
+**Cause:** Recompressed SWU files missing `sw-description.sig` or incorrect file order.
+
+**SWUpdate requires EXACT file order:**
+1. `sw-description` (MUST be first)
+2. `sw-description.sig` (MUST be second)
+3. Image files (ext4.gz, etc.)
+
+**Diagnosis:**
+```bash
+# Check file order in recompressed SWU
+cpio -it < tmp/deploy/images/<MACHINE>/adu-update-image-v1.0.0-recompressed.swu | head -5
+
+# Expected output:
+# sw-description
+# sw-description.sig           ← Must be present!
+# adu-update-image-v1-<MACHINE>.ext4.gz
+
+# If sw-description.sig is missing or wrong order, rebuild
+```
+
+**Solution:**
+```bash
+# Rebuild delta-image recipe with clean state
+bitbake -c cleansstate adu-delta-image
+bitbake adu-delta-image
+
+# Verify all recompressed files have signatures
+for f in tmp/deploy/images/<MACHINE>/*-recompressed.swu; do
+    echo "=== $(basename $f) ==="
+    cpio -it < "$f" 2>/dev/null | head -3
+done
+```
+
+**Technical Details:**
+- The `do_recompress_and_sign_v1/v2/v3` tasks decompress gzip-compressed ext4 images and sign the resulting SWU
+- Signing adds `sw-description.sig` file with RSA-2048 signature
+- CPIO archive uses `-H crc` format with exact file ordering for SWUpdate compatibility
+- Missing signatures cause SWUpdate to reject files even if sw-description itself is valid
+
+---
+
 ## Testing and Validation
 
 ### Verify Delta Generation Pipeline
@@ -763,43 +935,36 @@ This layer demonstrates a complete delta generation workflow that **device build
 
 ### Step 1: Create Your Base Image Recipe
 
-In your BSP layer (e.g., `meta-myboard/recipes-core/images/myboard-adu-base.bb`):
+In your BSP layer, create a recipe named `adu-base-image` (e.g., `meta-myboard/recipes-core/images/adu-base-image.bb`):
 
 ```bitbake
 require recipes-core/images/core-image-minimal.bb
 
 DESCRIPTION = "My device base image for ADU updates"
 
-# CRITICAL: Provide virtual interface for samples layer
-PROVIDES = "virtual/adu-base-image"
-
 # Add your hardware-specific packages
 IMAGE_INSTALL:append = " \
     myboard-firmware \
     myboard-drivers \
     myboard-config \
-    azure-device-update-agent \
+    azure-device-update \
 "
 
 # Configure A/B update infrastructure
 inherit adu-filesystem-layout swupdate-image
-
-# Board-specific partition layout
-ADU_PARTITION_LAYOUT = "dual-rootfs"
 ```
+
+> **Note:** The recipe **must** be named `adu-base-image` because the sample
+> image recipes depend on it by that exact name.
 
 ### Step 2: Configure BitBake Variables
 
 In your `conf/local.conf`:
 
 ```bitbake
-# Point to your base image
-PREFERRED_PROVIDER_virtual/adu-base-image = "myboard-adu-base"
-
 # Set your product metadata
 ADU_PROVIDER = "MyCompany"
 ADU_MODEL = "MyProduct-v2"
-BASE_ADU_SOFTWARE_VERSION = "1.0.0"
 
 # Configure signing keys (generate with: openssl genrsa -aes256 -out priv.pem 2048)
 ADUC_PRIVATE_KEY = "${TOPDIR}/../keys/priv.pem"
@@ -855,8 +1020,9 @@ For production use, you may want to:
 cp recipes-samples/images/adu-update-image-v3.bb \
    recipes-samples/images/adu-update-image-v4.bb
 
-# Update version increment
-ADU_SOFTWARE_VERSION = "${@oe.utils.inc_pr("BASE_ADU_SOFTWARE_VERSION", 3)}"
+# Edit v4.bb — set a new hardcoded version
+ADU_SOFTWARE_VERSION = "1.0.0.4"
+export IMAGE_LINK_NAME = "adu-update-image-v4"
 ```
 
 **B. Modify Delta Generation Strategy**
@@ -886,74 +1052,6 @@ az storage blob upload-batch \
     --destination adu-updates \
     --pattern "adu-delta*.diff"
 ```
-
----
-
-## Demonstration Scenarios
-
-This layer enables multiple Azure Device Update demonstration workflows:
-
-### Demo 1: Full-Image Update (Basic)
-**Target Audience:** Device builders learning ADU basics
-**Requirements:** ADU agent + device connection
-**What it demonstrates:** Installing a complete update package via Azure IoT Hub
-
-**Steps:**
-1. Flash device with base image containing v1.0.0
-2. Upload `adu-update-image-v2.0.0.swu` and manifest to Azure Portal
-3. Deploy update to device via IoT Hub
-4. Device downloads and installs v2.0.0 (full package ~240MB)
-
-**Layer artifacts used:** `adu-update-image-v2.0.0.swu`
-
-**Key Learning:** Basic ADU deployment flow, SWUpdate integration, A/B update mechanisms
-
----
-
-### Demo 2: Delta Update (Advanced)
-**Target Audience:** Update builders optimizing bandwidth and deployment speed
-**Requirements:** ADU agent + delta support enabled + sufficient storage
-**What it demonstrates:** Efficient updates using binary diff patches
-
-**Steps:**
-1. Device running v1.0.0 (has `adu-update-image-v1.0.0-recompressed.swu` stored)
-2. Upload `adu-delta-v1-to-v2.diff` to Azure Storage
-3. Deploy delta update via IoT Hub
-4. Device downloads delta (~20MB vs ~240MB full image)
-5. ADU agent reconstructs v2.0.0 from: v1.0.0-recompressed.swu + delta
-6. ADU agent installs reconstructed v2.0.0.swu
-
-**Layer artifacts used:** 
-- `adu-delta-v1-to-v2.diff` (binary patch)
-- `adu-update-image-v1.0.0-recompressed.swu` (stored on device as source)
-
-**Benefits:** 
-- **~91% bandwidth savings** (20MB delta vs 240MB full image for this sample)
-- Faster deployment over cellular/satellite connections
-- Lower cloud egress costs
-- Reduced update time
-
-**Key Learning:** Delta generation workflow, recompression requirements, reconstruction verification
-
----
-
-### Demo 3: Multi-Version Update Chain
-**Target Audience:** Product teams planning staged rollouts
-**Requirements:** ADU agent + A/B update support + rollback capability
-**What it demonstrates:** Controlled rollout through multiple versions, testing update chaining
-
-**Steps:**
-1. Device at v1.0.0 (initial deployment)
-2. Deploy delta v1→v2 (1.0.0 → 2.0.0) - verify functionality
-3. Deploy delta v2→v3 (2.0.0 → 3.0.0) - demonstrate continuous updates
-4. Optional: Rollback v3→v2→v1 using stored versions
-
-**Layer artifacts used:**
-- All three versioned .swu files
-- All three delta files
-- Recompressed files for each version
-
-**Key Learning:** Update chaining, version management, delta applicability across multiple hops
 
 ---
 
@@ -1018,6 +1116,178 @@ See [LICENSE](LICENSE) file for full text.
 
 ---
 
+## Delta Test Package
+
+The **adu-delta-test-package** recipe creates a comprehensive test package containing all artifacts needed for on-device delta update testing and verification.
+
+### Building the Test Package
+
+```bash
+# Build all update images and delta files first
+bitbake adu-update-image-v1 adu-update-image-v2 adu-update-image-v3
+bitbake adu-delta-image
+
+# Build the test package
+bitbake adu-delta-test-package
+```
+
+### Package Contents
+
+The test package is deployed to `tmp/deploy/images/<MACHINE>/adu-delta-test-package.tar.gz` and contains:
+
+```
+delta-test-package-YYYYMMDD-HHMMSS/
+├── images/                    # Base image and original update files
+│   ├── adu-base-image.wic.gz
+│   ├── adu-update-image-v1.swu
+│   ├── adu-update-image-v2.swu
+│   └── adu-update-image-v3.swu
+├── update-1.0.0/              # Update v1 deployment package
+│   ├── contoso.adu-yocto-rpi4-poc-1.1.0.0.importmanifest.json
+│   ├── adu-update-image-v1.0.0-recompressed.swu
+│   └── yocto-a-b-update.sh
+├── update-2.0.0/              # Update v2 deployment package (delta)
+│   ├── contoso.adu-yocto-rpi4-poc-1.2.0.0.importmanifest.json
+│   ├── adu-delta-v1-to-v2.diff
+│   ├── adu-update-image-v2.0.0-recompressed.swu
+│   └── yocto-a-b-update.sh
+├── update-3.0.0/              # Update v3 deployment package (multiple delta paths)
+│   ├── contoso.adu-yocto-rpi4-poc-1.3.0.0.importmanifest.json
+│   ├── adu-delta-v1-to-v3.diff
+│   ├── adu-delta-v2-to-v3.diff
+│   ├── adu-update-image-v3.0.0-recompressed.swu
+│   └── yocto-a-b-update.sh
+├── scripts/                   # On-device testing scripts
+│   ├── cache_manager.sh       # SDC cache operations
+│   └── delta_operations.py    # Delta verification utilities
+└── docs/                      # Documentation
+    ├── BUILD-TOOLS.md         # Native build tool reference
+    └── TESTING_GUIDE.md       # On-device testing procedures
+```
+
+**On-Device Testing Tools (scripts/)**
+- `cache_manager.sh` - Standalone Delta Cache (SDC) management for `/var/lib/adu/sdc/`
+- `delta_operations.py` - Python utilities for delta verification and testing
+
+**Build-Time Tools (NOT included)**
+
+Native x86_64 tools used during `bitbake adu-delta-image` (see `docs/BUILD-TOOLS.md` for details):
+- `diffgentool` - C# delta generator (PAMZ format)
+- `applydiff` - C++ delta reconstructor/verifier  
+- `recompress` - SWUpdate recompression tool
+- `libadudiffapi.so` - Core delta library
+
+> **Note:** The test package focuses on **on-device verification** with pre-generated deltas. Build-time tools run during the Yocto build on the host machine (x86_64) and are documented in `docs/BUILD-TOOLS.md` for reference.
+
+**Documentation (docs/)**
+- `BUILD-TOOLS.md` - Comprehensive reference for native build tools (diffgentool, applydiff, recompress, etc.)
+- `TESTING_GUIDE.md` - On-device testing procedures and expected results
+
+### On-Device Testing
+
+Transfer the package to your device and extract:
+
+```bash
+# Transfer to device
+scp tmp/deploy/images/raspberrypi4-64/adu-delta-test-package-*.tar.gz pi@<device-ip>:~
+
+# On the device
+tar -xzf adu-delta-test-package-*.tar.gz
+cd delta-test-package-*/
+```
+
+### Cache Management Operations
+
+**Store source images in cache:**
+
+```bash
+# Store v1 as source for delta updates
+./scripts/cache_manager.sh store \
+    images/adu-update-image-v1.0.0-recompressed.swu \
+    "Contoso" \
+    "1.0.0"
+
+# List cached files
+./scripts/cache_manager.sh list
+
+# Show cache information
+./scripts/cache_manager.sh info
+```
+
+**Verify cache operations:**
+
+```bash
+# Lookup specific version
+./scripts/cache_manager.sh lookup "Contoso" "1.0.0"
+
+# Verify file matches cache
+./scripts/cache_manager.sh verify \
+    images/adu-update-image-v1.0.0-recompressed.swu \
+    "Contoso" \
+    "1.0.0"
+```
+
+### Expected Cache Structure
+
+After storing files, the cache at `/var/lib/adu/sdc/` should contain:
+
+```
+/var/lib/adu/sdc/
+└── Contoso/
+    ├── sha256-<hash-v1>              # v1 recompressed SWU
+    ├── sha256-<hash-v1>.meta         # Metadata (version: 1.0.0)
+    ├── sha256-<hash-v2>              # v2 recompressed SWU
+    └── sha256-<hash-v2>.meta         # Metadata (version: 2.0.0)
+```
+
+**Ownership:** `adu:adu`  
+**Permissions:** `644` for files, `755` for directories
+
+### Integration with ADU Agent
+
+The ADU agent uses these cache locations:
+
+- **Config:** `/etc/adu/du-config.json`
+- **Downloads:** `/var/lib/adu/downloads/<workflow-id>/`
+- **Source Cache:** `/var/lib/adu/sdc/`
+- **Extensions:** `/var/lib/adu/extensions/download_handlers/`
+- **Logs:** `journalctl -u adu-agent -f`
+
+**Delta update workflow:**
+1. **On successful update:** Agent stores new version in cache
+2. **On delta update:** Agent looks up source from cache, downloads delta, reconstructs target
+3. **Cache expiration:** Old versions can be cleaned up based on policy
+
+### Performance Metrics (Raspberry Pi 4)
+
+- **Cache Store:** < 30 seconds (includes SHA256 calculation)
+- **Cache Lookup:** < 1 second  
+- **Delta Reconstruction:** ~30-60 seconds
+
+### Troubleshooting
+
+**Permission errors:**
+```bash
+sudo chown -R adu:adu /var/lib/adu/sdc/
+sudo chmod -R 755 /var/lib/adu/sdc/
+```
+
+**Cache not found:**
+```bash
+sudo mkdir -p /var/lib/adu/sdc/
+sudo chown adu:adu /var/lib/adu/sdc/
+```
+
+**Monitor ADU agent:**
+```bash
+journalctl -u adu-agent -f
+systemctl status adu-agent
+```
+
+For complete testing procedures, see the `TESTING_GUIDE.md` included in the test package.
+
+---
+
 ## Support and Contact
 
 ### For Issues Related To:
@@ -1056,17 +1326,18 @@ See [LICENSE](LICENSE) file for full text.
 │  AUDIENCE: Device builders, update builders                 │
 │  SCOPE: Demonstration/reference only (not production)       │
 ├─────────────────────────────────────────────────────────────┤
-│  REQUIRED VARIABLES (conf/local.conf):                      │
-│    PREFERRED_PROVIDER_virtual/adu-base-image = "..."        │
+│  REQUIRED (conf/local.conf):                                │
 │    ADUC_PRIVATE_KEY = "/path/to/priv.pem"                   │
 │    ADUC_PRIVATE_KEY_PASSWORD = "/path/to/priv.pass"         │
+│  REQUIRED (BSP layer):                                      │
+│    adu-base-image recipe                                    │
 ├─────────────────────────────────────────────────────────────┤
 │  BUILD:                                                     │
 │    bitbake adu-update-image-v1 adu-update-image-v2 ...      │
 │    bitbake adu-delta-image  # Generates & verifies deltas   │
 ├─────────────────────────────────────────────────────────────┤
 │  OUTPUT: tmp/deploy/images/<MACHINE>/                       │
-│    • adu-update-image-v*.0.0.swu         (Originals)        │
+│    • adu-update-image-v*-<MACHINE>.swu   (Originals)        │
 │    • adu-update-image-v*.0.0-recompressed.swu (Sources)     │
 │    • adu-delta-v*-to-v*.diff             (Binary diffs)     │
 │    • *.sha256                            (Checksums)        │
